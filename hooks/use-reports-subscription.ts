@@ -56,13 +56,23 @@ export function useReportsSubscription() {
               setReports((prev) => [converted, ...prev])
             }
           } else if (payload.eventType === 'UPDATE') {
-            // Report updated
+            // Report updated - ensure we get the latest data
             const updatedReport = payload.new as ReportFromDB
             const converted = convertReportFromDB(updatedReport)
             if (mounted) {
-              setReports((prev) =>
-                prev.map((report) => (report.id === converted.id ? converted : report))
-              )
+              setReports((prev) => {
+                const existingIndex = prev.findIndex((r) => r.id === converted.id)
+                if (existingIndex >= 0) {
+                  // Update existing report
+                  const updated = [...prev]
+                  updated[existingIndex] = converted
+                  return updated
+                } else {
+                  // Report not in list, add it (shouldn't happen but handle it)
+                  return [converted, ...prev]
+                }
+              })
+              console.log('Report updated via real-time:', converted.id, 'Status:', converted.status)
             }
           } else if (payload.eventType === 'DELETE') {
             // Report deleted
@@ -74,9 +84,13 @@ export function useReportsSubscription() {
         }
       )
       .subscribe((status) => {
-        console.log('Subscription status:', status)
+        console.log('📡 Reports subscription status:', status)
         if (status === 'SUBSCRIBED') {
-          console.log('Successfully subscribed to reports changes')
+          console.log('✅ Successfully subscribed to reports changes (real-time enabled)')
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('❌ Real-time subscription error. Check Supabase Realtime is enabled.')
+        } else if (status === 'TIMED_OUT') {
+          console.warn('⚠️ Real-time subscription timed out. Check network connection.')
         }
       })
 

@@ -73,6 +73,7 @@ import { trackMapInteraction } from "@/lib/analytics"
 interface AdminViewProps {
   reports: Report[]
   onStatusChange: (reportId: string, newStatus: ReportStatus) => void
+  onTeamAssigned?: (reportId: string, teamName: string) => void
 }
 
 type AdminTab = "dashboard" | "reports" | "map" | "teams" | "analytics"
@@ -129,7 +130,7 @@ function ReportTriageModal({
   onClose: () => void
   onStatusChange: (reportId: string, newStatus: ReportStatus) => void
   teams: Team[]
-  onTeamAssigned?: () => void
+  onTeamAssigned?: (reportId: string, teamName: string) => void
   onReportDeleted?: () => void
 }) {
   const [selectedTeam, setSelectedTeam] = useState<string>(report?.assignedTo || "")
@@ -146,19 +147,21 @@ function ReportTriageModal({
     if (!selectedTeam) return
     
     try {
-      await assignTeamToReport(report.id, selectedTeam)
-      toast({
-        title: "Success",
-        description: `Report assigned to ${selectedTeam}`,
-      })
-      
-      // If status is pending, also update to in-progress
-      if (report.status === "pending") {
-        onStatusChange(report.id, "in-progress")
-      }
-      
+      // Call the parent handler which will update the database and UI
       if (onTeamAssigned) {
-        onTeamAssigned()
+        await onTeamAssigned(report.id, selectedTeam)
+      } else {
+        // Fallback: direct assignment if handler not provided
+        await assignTeamToReport(report.id, selectedTeam)
+        toast({
+          title: "Success",
+          description: `Report assigned to ${selectedTeam}`,
+        })
+        
+        // If status is pending, also update to in-progress
+        if (report.status === "pending") {
+          onStatusChange(report.id, "in-progress")
+        }
       }
     } catch (error) {
       toast({
@@ -478,7 +481,7 @@ function formatDate(date: Date): string {
   })
 }
 
-export function AdminView({ reports, onStatusChange }: AdminViewProps) {
+export function AdminView({ reports, onStatusChange, onTeamAssigned }: AdminViewProps) {
   const [isLoaded, setIsLoaded] = useState(false)
   const [activeTab, setActiveTab] = useState<AdminTab>("dashboard")
   const [searchQuery, setSearchQuery] = useState("")
@@ -1423,10 +1426,7 @@ export function AdminView({ reports, onStatusChange }: AdminViewProps) {
           onClose={() => setSelectedReport(null)}
           onStatusChange={onStatusChange}
           teams={mockTeams}
-          onTeamAssigned={() => {
-            // Refresh reports will happen automatically via real-time subscription
-            // The subscription will update the reports list when assigned_to changes
-          }}
+          onTeamAssigned={onTeamAssigned}
           onReportDeleted={() => {
             // Refresh reports will happen automatically via real-time subscription
             // The subscription will remove the deleted report from the list

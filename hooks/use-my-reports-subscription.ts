@@ -146,9 +146,26 @@ export function useMyReportsSubscription(deviceId: string | null, userId: string
             if (report && belongsToUser(report)) {
               const converted = convertReportFromDB(report)
               if (mounted) {
-                setMyReports((prev) =>
-                  prev.map((r) => (r.id === converted.id ? converted : r))
-                )
+                setMyReports((prev) => {
+                  const existingIndex = prev.findIndex((r) => r.id === converted.id)
+                  if (existingIndex >= 0) {
+                    // Update existing report - this will trigger notifications
+                    const updated = [...prev]
+                    const oldReport = updated[existingIndex]
+                    updated[existingIndex] = converted
+                    console.log('My report updated via real-time:', {
+                      id: converted.id,
+                      oldStatus: oldReport.status,
+                      newStatus: converted.status,
+                      oldAssigned: oldReport.assignedTo,
+                      newAssigned: converted.assignedTo
+                    })
+                    return updated
+                  } else {
+                    // Report not in list, add it
+                    return [converted, ...prev]
+                  }
+                })
               }
             }
           } else if (payload.eventType === 'DELETE') {
@@ -161,9 +178,13 @@ export function useMyReportsSubscription(deviceId: string | null, userId: string
         }
       )
       .subscribe((status) => {
-        console.log('My reports subscription status:', status)
+        console.log('📡 My reports subscription status:', status)
         if (status === 'SUBSCRIBED') {
-          console.log('Successfully subscribed to my reports changes')
+          console.log('✅ Successfully subscribed to my reports changes (real-time enabled)')
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('❌ My reports subscription error. Check Supabase Realtime is enabled.')
+        } else if (status === 'TIMED_OUT') {
+          console.warn('⚠️ My reports subscription timed out. Check network connection.')
         }
       })
 

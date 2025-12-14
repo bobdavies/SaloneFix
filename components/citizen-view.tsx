@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect, useMemo, useRef } from "react"
 import Image from "next/image"
 import {
   AlertTriangle,
@@ -46,6 +46,8 @@ import { getCurrentUser } from "@/src/services/authService"
 import { supabase } from "@/src/lib/supabase"
 import { getDeviceId } from "@/src/lib/deviceId"
 import { useMyReportsSubscription } from "@/hooks/use-my-reports-subscription"
+import { useNotifications } from "@/hooks/use-notifications"
+import { NotificationDropdown } from "@/components/notification-dropdown"
 
 interface CitizenViewProps {
   reports: Report[]
@@ -234,6 +236,36 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
   
   // Use real-time subscription for "My Reports"
   const { myReports, isLoading: isLoadingMyReports, setMyReports } = useMyReportsSubscription(deviceId, currentUserId)
+  
+  // Notification system for status changes
+  const {
+    notifications,
+    unreadCount,
+    markAsRead,
+    markAllAsRead,
+    clearAll,
+    getNotificationMessage,
+  } = useNotifications(myReports)
+
+  // Show toast notifications when new notifications arrive
+  const previousNotificationCountRef = useRef(0)
+  useEffect(() => {
+    // Only show toast if we have new notifications (count increased)
+    if (notifications.length > previousNotificationCountRef.current) {
+      const newNotifications = notifications.slice(0, notifications.length - previousNotificationCountRef.current)
+      // Show toast for the most recent new notification
+      if (newNotifications.length > 0) {
+        const latestNotification = newNotifications[0]
+        const message = getNotificationMessage(latestNotification)
+        toast({
+          title: latestNotification.status === 'resolved' ? 'Report Resolved! 🎉' : 'Status Updated',
+          description: message,
+          duration: 5000,
+        })
+      }
+    }
+    previousNotificationCountRef.current = notifications.length
+  }, [notifications.length, getNotificationMessage, toast])
   
   // Track when component has mounted (client-side only)
   useEffect(() => {
@@ -477,14 +509,22 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
           </div>
 
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" className="relative">
-              <Bell className="h-5 w-5" />
-              {isMounted && myReports.filter((r) => r.status === "in-progress").length > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
-                  {myReports.filter((r) => r.status === "in-progress").length}
-                </span>
-              )}
-            </Button>
+            <NotificationDropdown
+              notifications={notifications}
+              unreadCount={unreadCount}
+              onMarkAsRead={markAsRead}
+              onMarkAllAsRead={markAllAsRead}
+              onClearAll={clearAll}
+              getNotificationMessage={getNotificationMessage}
+              onNotificationClick={(reportId) => {
+                // Find and show the report
+                const report = myReports.find((r) => r.id === reportId)
+                if (report) {
+                  setSelectedReport(report)
+                  setActiveTab("my-reports")
+                }
+              }}
+            />
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success/10 border border-success/20">
               <span className="h-2 w-2 rounded-full bg-success animate-pulse" />
               <span className="text-xs font-medium text-success">Online</span>
@@ -734,28 +774,34 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
                   variant="outline"
                   size="sm"
                   onClick={async () => {
-                    // Manual refresh
+                    // Manual refresh with loading state
                     try {
                       const dbReports = await fetchReportsByDeviceOrUser(deviceId, currentUserId)
                       const convertedReports = dbReports.map(convertReportFromDB)
                       setMyReports(convertedReports)
                       toast({
                         title: "Refreshed",
-                        description: `Loaded ${convertedReports.length} reports`,
+                        description: `Loaded ${convertedReports.length} report${convertedReports.length !== 1 ? 's' : ''}`,
+                        duration: 2000,
                       })
                     } catch (error) {
+                      console.error('Refresh error:', error)
                       toast({
-                        title: "Error",
-                        description: "Failed to refresh reports",
+                        title: "Refresh Failed",
+                        description: error instanceof Error ? error.message : "Failed to refresh reports. Please try again.",
                         variant: "destructive",
+                        duration: 3000,
                       })
                     }
                   }}
                   disabled={isLoadingMyReports}
-                  className="text-xs"
+                  className={cn(
+                    "text-xs transition-all duration-200",
+                    isLoadingMyReports && "opacity-75 cursor-wait"
+                  )}
                 >
-                  <RefreshCw className={cn("h-3.5 w-3.5 mr-1.5", isLoadingMyReports && "animate-spin")} />
-                  Refresh
+                  <RefreshCw className={cn("h-3.5 w-3.5 mr-1.5 transition-transform", isLoadingMyReports && "animate-spin")} />
+                  {isLoadingMyReports ? "Refreshing..." : "Refresh"}
                 </Button>
               <input
                 ref={setFileInputRef}
