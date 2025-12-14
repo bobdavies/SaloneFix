@@ -11,21 +11,35 @@ export function useReportsSubscription() {
   useEffect(() => {
     let mounted = true
 
-    // Initial fetch - only load once, real-time will handle updates
+    // Initial fetch - load fresh data from database
+    // Use a timestamp to prevent caching
     const loadReports = async () => {
       try {
         setIsLoading(true)
-        console.log('🔄 Loading initial reports from database...')
+        console.log('🔄 Loading initial reports from database (fresh fetch)...')
         const dbReports = await fetchAllReports()
         if (mounted) {
           const convertedReports = dbReports.map(convertReportFromDB)
           console.log(`✅ Loaded ${convertedReports.length} reports from database`)
+          
           // Log status distribution for debugging
           const statusCounts = convertedReports.reduce((acc, r) => {
             acc[r.status] = (acc[r.status] || 0) + 1
             return acc
           }, {} as Record<string, number>)
           console.log('📊 Status distribution:', statusCounts)
+          
+          // Log a sample report to verify data
+          if (convertedReports.length > 0) {
+            const sample = convertedReports[0]
+            console.log('📋 Sample report:', {
+              id: sample.id.substring(0, 8) + '...',
+              status: sample.status,
+              assignedTo: sample.assignedTo,
+              title: sample.title
+            })
+          }
+          
           setReports(convertedReports)
           setError(null)
         }
@@ -41,7 +55,20 @@ export function useReportsSubscription() {
       }
     }
 
+    // Load immediately
     loadReports()
+    
+    // Also reload after a short delay to catch any updates that happened during page load
+    const reloadTimeout = setTimeout(() => {
+      if (mounted) {
+        console.log('🔄 Reloading reports after initial load (catch any missed updates)...')
+        loadReports()
+      }
+    }, 2000)
+    
+    return () => {
+      clearTimeout(reloadTimeout)
+    }
 
     // Set up real-time subscription
     const channel = supabase

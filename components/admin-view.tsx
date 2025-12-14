@@ -74,6 +74,7 @@ interface AdminViewProps {
   reports: Report[]
   onStatusChange: (reportId: string, newStatus: ReportStatus) => void
   onTeamAssigned?: (reportId: string, teamName: string) => void
+  onRefresh?: () => void
 }
 
 type AdminTab = "dashboard" | "reports" | "map" | "teams" | "analytics"
@@ -481,7 +482,7 @@ function formatDate(date: Date): string {
   })
 }
 
-export function AdminView({ reports, onStatusChange, onTeamAssigned }: AdminViewProps) {
+export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }: AdminViewProps) {
   const [isLoaded, setIsLoaded] = useState(false)
   const [activeTab, setActiveTab] = useState<AdminTab>("dashboard")
   const [searchQuery, setSearchQuery] = useState("")
@@ -714,6 +715,18 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned }: AdminView
                 className="pl-9 bg-muted/50"
               />
             </div>
+
+            {onRefresh && (
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="hidden sm:flex gap-2 bg-transparent"
+                onClick={onRefresh}
+              >
+                <RefreshCw className="h-4 w-4" />
+                Refresh
+              </Button>
+            )}
 
             <Button variant="outline" size="sm" className="hidden sm:flex gap-2 bg-transparent">
               <Download className="h-4 w-4" />

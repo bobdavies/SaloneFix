@@ -486,13 +486,35 @@ export type ReportFromDB = {
 
 // --- HELPER FOR ADMIN DASHBOARD ---
 export async function fetchAllReports(): Promise<ReportFromDB[]> {
-    const { data, error } = await supabase
-      .from('reports')
-      .select('*')
-      .order('created_at', { ascending: false })
-    
-    if (error) throw error
-    return (data || []) as ReportFromDB[]
+    try {
+      // Add a small random parameter to prevent caching
+      const cacheBuster = Date.now()
+      const { data, error } = await supabase
+        .from('reports')
+        .select('*')
+        .order('created_at', { ascending: false })
+      
+      if (error) {
+        console.error('❌ Error fetching all reports:', error)
+        throw error
+      }
+      
+      console.log(`📥 Fetched ${data?.length || 0} reports from database (cache-busted)`)
+      
+      // Log status distribution for debugging
+      if (data && data.length > 0) {
+        const statusCounts = data.reduce((acc, r) => {
+          acc[r.status] = (acc[r.status] || 0) + 1
+          return acc
+        }, {} as Record<string, number>)
+        console.log('📊 Database status distribution:', statusCounts)
+      }
+      
+      return (data || []) as ReportFromDB[]
+    } catch (error) {
+      console.error('❌ fetchAllReports failed:', error)
+      throw error
+    }
 }
 
 // --- HELPER FOR CITIZEN "MY REPORTS" ---

@@ -8,10 +8,34 @@ import { updateReportStatus as updateReportStatusInDB, assignTeamToReport, delet
 import { trackStatusUpdate } from "@/lib/analytics"
 import { useToast } from "@/hooks/use-toast"
 import { useReportsSubscription } from "@/hooks/use-reports-subscription"
+// Import test functions for debugging
+import "@/src/services/testDatabase"
 
 function AdminPageContent() {
   const { reports, setReports, isLoading } = useReportsSubscription()
   const { toast } = useToast()
+  
+  // Expose refresh function for manual refresh button
+  const refreshReports = async () => {
+    try {
+      const { fetchAllReports, convertReportFromDB } = await import('@/src/services/reportService')
+      const dbReports = await fetchAllReports()
+      const convertedReports = dbReports.map(convertReportFromDB)
+      setReports(convertedReports)
+      toast({
+        title: "Refreshed",
+        description: `Loaded ${convertedReports.length} reports from database`,
+        duration: 2000,
+      })
+    } catch (error) {
+      console.error('Refresh failed:', error)
+      toast({
+        title: "Refresh Failed",
+        description: error instanceof Error ? error.message : "Failed to refresh reports",
+        variant: "destructive",
+      })
+    }
+  }
 
   const handleStatusChange = async (reportId: string, newStatus: ReportStatus) => {
     // Map ReportStatus to database status format
@@ -160,6 +184,7 @@ function AdminPageContent() {
         reports={reports} 
         onStatusChange={handleStatusChange}
         onTeamAssigned={handleTeamAssigned}
+        onRefresh={refreshReports}
       />
     </div>
   )
