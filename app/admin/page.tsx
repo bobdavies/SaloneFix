@@ -49,11 +49,34 @@ function AdminPageContent() {
       
       console.log(`✅ Report status updated successfully in database. Real-time subscription will update UI.`)
       
+      // Verify the update by fetching the report again (double-check)
+      // This ensures the database actually has the new status
+      try {
+        const { fetchAllReports, convertReportFromDB } = await import('@/src/services/reportService')
+        const allReports = await fetchAllReports()
+        const updatedReport = allReports.find(r => r.id === reportId)
+        if (updatedReport) {
+          const converted = convertReportFromDB(updatedReport)
+          const dbStatusNormalized = converted.status
+          if (dbStatusNormalized !== newStatus) {
+            console.warn(`⚠️ Status mismatch detected! UI: ${newStatus}, DB: ${dbStatusNormalized}`)
+            // Force update from database
+            setReports((prev) => prev.map((report) => 
+              report.id === reportId ? converted : report
+            ))
+          } else {
+            console.log(`✅ Verification passed: Database has status ${dbStatusNormalized}`)
+          }
+        }
+      } catch (verifyError) {
+        console.warn('Could not verify update:', verifyError)
+        // Continue anyway - real-time subscription should handle it
+      }
+      
       // Track analytics
       trackStatusUpdate(reportId, originalReport.status, newStatus)
       
       // The real-time subscription should automatically update the UI
-      // But we'll also manually refresh to ensure consistency
       toast({
         title: "Success",
         description: `Report status updated to ${newStatus}. Changes are saved.`,

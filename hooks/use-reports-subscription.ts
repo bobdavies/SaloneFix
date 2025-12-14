@@ -11,18 +11,26 @@ export function useReportsSubscription() {
   useEffect(() => {
     let mounted = true
 
-    // Initial fetch
+    // Initial fetch - only load once, real-time will handle updates
     const loadReports = async () => {
       try {
         setIsLoading(true)
+        console.log('🔄 Loading initial reports from database...')
         const dbReports = await fetchAllReports()
         if (mounted) {
           const convertedReports = dbReports.map(convertReportFromDB)
+          console.log(`✅ Loaded ${convertedReports.length} reports from database`)
+          // Log status distribution for debugging
+          const statusCounts = convertedReports.reduce((acc, r) => {
+            acc[r.status] = (acc[r.status] || 0) + 1
+            return acc
+          }, {} as Record<string, number>)
+          console.log('📊 Status distribution:', statusCounts)
           setReports(convertedReports)
           setError(null)
         }
       } catch (err) {
-        console.error('Failed to load reports:', err)
+        console.error('❌ Failed to load reports:', err)
         if (mounted) {
           setError(err instanceof Error ? err : new Error('Failed to load reports'))
         }
@@ -58,21 +66,36 @@ export function useReportsSubscription() {
           } else if (payload.eventType === 'UPDATE') {
             // Report updated - ensure we get the latest data
             const updatedReport = payload.new as ReportFromDB
+            const oldReport = payload.old as ReportFromDB | null
             const converted = convertReportFromDB(updatedReport)
+            
             if (mounted) {
               setReports((prev) => {
                 const existingIndex = prev.findIndex((r) => r.id === converted.id)
                 if (existingIndex >= 0) {
                   // Update existing report
                   const updated = [...prev]
+                  const previousReport = updated[existingIndex]
                   updated[existingIndex] = converted
+                  
+                  // Log the change for debugging
+                  console.log('🔄 Report updated via real-time:', {
+                    id: converted.id.substring(0, 8) + '...',
+                    oldStatus: previousReport.status,
+                    newStatus: converted.status,
+                    oldAssigned: previousReport.assignedTo,
+                    newAssigned: converted.assignedTo,
+                    dbStatus: updatedReport.status,
+                    dbAssigned: updatedReport.assigned_to
+                  })
+                  
                   return updated
                 } else {
                   // Report not in list, add it (shouldn't happen but handle it)
+                  console.log('➕ New report added via real-time update:', converted.id)
                   return [converted, ...prev]
                 }
               })
-              console.log('Report updated via real-time:', converted.id, 'Status:', converted.status)
             }
           } else if (payload.eventType === 'DELETE') {
             // Report deleted

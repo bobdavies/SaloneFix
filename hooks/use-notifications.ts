@@ -28,6 +28,7 @@ export function useNotifications(myReports: Report[]) {
 
     // Skip on initial load (when previousReports is empty)
     if (previousReports.length === 0) {
+      console.log('📋 Initializing notifications with', currentReports.length, 'reports')
       previousReportsRef.current = [...currentReports]
       return
     }
@@ -39,6 +40,13 @@ export function useNotifications(myReports: Report[]) {
       
       if (previousReport && previousReport.status !== currentReport.status) {
         // Status changed - create notification
+        console.log('🔔 Status change detected:', {
+          reportId: currentReport.id.substring(0, 8) + '...',
+          title: currentReport.title,
+          oldStatus: previousReport.status,
+          newStatus: currentReport.status
+        })
+        
         const notification: Notification = {
           id: `${currentReport.id}-${Date.now()}-${Math.random()}`,
           reportId: currentReport.id,
@@ -56,7 +64,10 @@ export function useNotifications(myReports: Report[]) {
           (previousReport.status === 'in-progress' && currentReport.status === 'resolved') ||
           (previousReport.status === 'pending' && currentReport.status === 'resolved')
         ) {
+          console.log('✅ Creating notification for status change:', notification)
           newNotifications.push(notification)
+        } else {
+          console.log('⏭️ Skipping notification (not a meaningful status change)')
         }
       }
     })
@@ -83,8 +94,20 @@ export function useNotifications(myReports: Report[]) {
     })
 
     if (newNotifications.length > 0) {
-      setNotifications((prev) => [...newNotifications, ...prev].slice(0, 50)) // Limit to 50 notifications
-      setUnreadCount((prev) => prev + newNotifications.length)
+      console.log(`🔔 Adding ${newNotifications.length} new notification(s)`)
+      setNotifications((prev) => {
+        const updated = [...newNotifications, ...prev].slice(0, 50) // Limit to 50 notifications
+        console.log(`📬 Total notifications: ${updated.length}`)
+        return updated
+      })
+      setUnreadCount((prev) => {
+        const newCount = prev + newNotifications.length
+        console.log(`🔴 Unread count: ${newCount}`)
+        return newCount
+      })
+    } else if (currentReports.length !== previousReports.length) {
+      // Reports count changed but no status changes - just log it
+      console.log('📊 Reports count changed:', previousReports.length, '→', currentReports.length)
     }
 
     // Update ref for next comparison

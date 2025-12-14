@@ -150,26 +150,59 @@ export async function updateReportStatus(
       console.warn('resolved_at column not found, updating status only')
     }
 
-    const { error } = await supabase
+    // Update and verify the update succeeded by selecting the updated row
+    const { data, error } = await supabase
       .from('reports')
       .update(updateData)
       .eq('id', reportId)
+      .select()
+      .single()
 
     if (error) {
       // If error is about resolved_at column, try again without it
       if (error.message?.includes('resolved_at') || error.message?.includes('column')) {
         console.warn('resolved_at column not found, updating status only')
-        const { error: retryError } = await supabase
+        const { data: retryData, error: retryError } = await supabase
           .from('reports')
           .update({ status: newStatus })
           .eq('id', reportId)
+          .select()
+          .single()
         
         if (retryError) throw new Error(`Failed to update status: ${retryError.message}`)
+        
+        // Verify the update
+        if (retryData && retryData.status !== newStatus) {
+          throw new Error(`Status update verification failed. Expected ${newStatus}, got ${retryData.status}`)
+        }
+        
+        console.log('✅ Status updated and verified:', { reportId, status: retryData?.status })
         return true
       }
       throw new Error(`Failed to update status: ${error.message}`)
     }
     
+    // Verify the update actually happened
+    if (!data) {
+      console.error('❌ Update succeeded but no data returned')
+      throw new Error('Update succeeded but no data returned')
+    }
+    
+    if (data.status !== newStatus) {
+      console.error('❌ Status update verification failed:', {
+        expected: newStatus,
+        actual: data.status,
+        reportId
+      })
+      throw new Error(`Status update verification failed. Expected ${newStatus}, got ${data.status}`)
+    }
+    
+    console.log('✅ Status updated and verified in database:', { 
+      reportId: reportId.substring(0, 8) + '...', 
+      status: data.status, 
+      assigned_to: data.assigned_to,
+      timestamp: new Date().toISOString()
+    })
     return true
   } catch (error) {
     console.error('Error updating report status:', error)
@@ -183,10 +216,13 @@ export async function assignTeamToReport(
   teamName: string
 ) {
   try {
-    const { error } = await supabase
+    // Update and verify the update succeeded by selecting the updated row
+    const { data, error } = await supabase
       .from('reports')
       .update({ assigned_to: teamName })
       .eq('id', reportId)
+      .select()
+      .single()
 
     if (error) {
       // If error is about assigned_to column not existing, provide helpful message but don't fail completely
@@ -204,6 +240,16 @@ export async function assignTeamToReport(
       throw new Error(`Failed to assign team: ${errorMsg}`)
     }
     
+    // Verify the update actually happened
+    if (!data) {
+      throw new Error('Team assignment succeeded but no data returned')
+    }
+    
+    if (data.assigned_to !== teamName) {
+      throw new Error(`Team assignment verification failed. Expected ${teamName}, got ${data.assigned_to}`)
+    }
+    
+    console.log('✅ Team assigned and verified:', { reportId, team: data.assigned_to, status: data.status })
     return true
   } catch (error) {
     console.error('Error assigning team:', error)

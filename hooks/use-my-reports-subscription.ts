@@ -153,13 +153,19 @@ export function useMyReportsSubscription(deviceId: string | null, userId: string
                     const updated = [...prev]
                     const oldReport = updated[existingIndex]
                     updated[existingIndex] = converted
-                    console.log('My report updated via real-time:', {
-                      id: converted.id,
+                    console.log('🔄 My report updated via real-time:', {
+                      id: converted.id.substring(0, 8) + '...',
+                      title: converted.title,
                       oldStatus: oldReport.status,
                       newStatus: converted.status,
                       oldAssigned: oldReport.assignedTo,
-                      newAssigned: converted.assignedTo
+                      newAssigned: converted.assignedTo,
+                      dbStatus: report.status,
+                      dbAssigned: report.assigned_to
                     })
+                    
+                    // This state update will trigger the notification hook
+                    // The notification hook compares previousReportsRef with the new state
                     return updated
                   } else {
                     // Report not in list, add it
