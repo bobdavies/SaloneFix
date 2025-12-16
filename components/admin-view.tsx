@@ -40,7 +40,10 @@ import type { Report, ReportStatus, ReportCategory, Team } from "@/lib/types"
 import { mockTeams } from "@/lib/types"
 import dynamic from "next/dynamic"
 import type { LatLngExpression } from "leaflet"
-import { fetchAllReports, type ReportFromDB, assignTeamToReport, deleteReport, updateReportWithProof, uploadProofImage } from "@/src/services/reportService"
+import { fetchAllReports, type ReportFromDB, assignTeamToReport, deleteReport, updateReportWithProof, uploadProofImage, convertReportFromDBWithActivityLog } from "@/src/services/reportService"
+import { fetchAllTeams, convertTeamFromDB, type TeamFromDB } from "@/src/services/teamService"
+import { fetchActivityLogForReport } from "@/src/services/activityLogService"
+import { testAdminAccess } from "@/src/services/adminService"
 import { useToast } from "@/hooks/use-toast"
 
 // Dynamically import Leaflet components with SSR disabled (they require window object)
@@ -140,36 +143,125 @@ function ReportTriageModal({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [proofFile, setProofFile] = useState<File | null>(null)
   const [isUploadingProof, setIsUploadingProof] = useState(false)
+  const [activityLog, setActivityLog] = useState<Report['activityLog']>(report?.activityLog || [])
+  const [isLoadingActivityLog, setIsLoadingActivityLog] = useState(false)
+  const [isAssigningTeam, setIsAssigningTeam] = useState(false)
   const { toast } = useToast()
+  
+  // Update selectedTeam when report changes
+  useEffect(() => {
+    if (report?.assignedTo) {
+      setSelectedTeam(report.assignedTo)
+    } else {
+      setSelectedTeam("")
+    }
+  }, [report?.assignedTo])
+
+  // Fetch activity log when modal opens
+  useEffect(() => {
+    if (report?.id) {
+      setIsLoadingActivityLog(true)
+      fetchActivityLogForReport(report.id)
+        .then((entries) => {
+          const convertedLog = entries.map((entry) => ({
+            id: entry.id,
+            action: entry.details || entry.action,
+            user: entry.performed_by,
+            timestamp: new Date(entry.created_at),
+            details: entry.metadata ? JSON.stringify(entry.metadata) : undefined,
+          }))
+          setActivityLog(convertedLog)
+        })
+        .catch((error) => {
+          console.error('Failed to fetch activity log:', error)
+          setActivityLog(report.activityLog || [])
+        })
+        .finally(() => {
+          setIsLoadingActivityLog(false)
+        })
+    }
+  }, [report?.id])
 
   if (!report) return null
 
   const handleAssign = async () => {
     if (!selectedTeam) return
     
+    setIsAssigningTeam(true)
     try {
+      console.log(`[ReportTriageModal] handleAssign called for report ${report.id} with team ${selectedTeam}`)
+      
       // Call the parent handler which will update the database and UI
       if (onTeamAssigned) {
+        console.log(`[ReportTriageModal] Calling onTeamAssigned handler`)
         await onTeamAssigned(report.id, selectedTeam)
+        console.log(`[ReportTriageModal] onTeamAssigned completed`)
       } else {
+        console.log(`[ReportTriageModal] No handler provided, using direct assignment`)
         // Fallback: direct assignment if handler not provided
-        await assignTeamToReport(report.id, selectedTeam)
-        toast({
-          title: "Success",
-          description: `Report assigned to ${selectedTeam}`,
-        })
-        
-        // If status is pending, also update to in-progress
-        if (report.status === "pending") {
-          onStatusChange(report.id, "in-progress")
+        const success = await assignTeamToReport(report.id, selectedTeam, 'Admin')
+        if (success) {
+          toast({
+            title: "Success",
+            description: `Report assigned to ${selectedTeam}`,
+          })
+          
+          // If status is pending, also update to in-progress
+          if (report.status === "pending") {
+            onStatusChange(report.id, "in-progress")
+          }
+        } else {
+          toast({
+            title: "Warning",
+            description: "Team assignment may have failed. Check console for details.",
+            variant: "destructive",
+          })
         }
       }
     } catch (error) {
+      console.error(`[ReportTriageModal] handleAssign error:`, error)
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to assign team",
         variant: "destructive",
       })
+    } finally {
+      setIsAssigningTeam(false)
+    }
+  }
+  
+  const handleUnassign = async () => {
+    setIsAssigningTeam(true)
+    try {
+      console.log(`[ReportTriageModal] handleUnassign called for report ${report.id}`)
+      
+      if (onTeamAssigned) {
+        // Pass empty string to unassign
+        await onTeamAssigned(report.id, "")
+        toast({
+          title: "Success",
+          description: "Team unassigned from report",
+        })
+      } else {
+        // Direct unassignment
+        const success = await assignTeamToReport(report.id, "", 'Admin')
+        if (success) {
+          toast({
+            title: "Success",
+            description: "Team unassigned from report",
+          })
+        }
+      }
+      setSelectedTeam("")
+    } catch (error) {
+      console.error(`[ReportTriageModal] handleUnassign error:`, error)
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to unassign team",
+        variant: "destructive",
+      })
+    } finally {
+      setIsAssigningTeam(false)
     }
   }
 
@@ -294,7 +386,15 @@ function ReportTriageModal({
                       key={status}
                       variant={report.status === status ? "default" : "outline"}
                       size="sm"
-                      onClick={() => onStatusChange(report.id, status)}
+                      onClick={async () => {
+                        console.log(`[ReportTriageModal] Status button clicked: ${status} for report ${report.id}`)
+                        try {
+                          await onStatusChange(report.id, status)
+                          console.log(`[ReportTriageModal] Status change completed`)
+                        } catch (error) {
+                          console.error(`[ReportTriageModal] Status change error:`, error)
+                        }
+                      }}
                       className={cn(
                         report.status === status && status === "pending" && "bg-muted-foreground",
                         report.status === status && status === "in-progress" && "bg-info",
@@ -308,66 +408,175 @@ function ReportTriageModal({
               </div>
 
               <div>
-                <label className="text-sm font-medium text-card-foreground">Assign to Team</label>
+                <label className="text-sm font-medium text-card-foreground">Team Assignment</label>
+                
+                {/* Currently Assigned Team Display */}
+                {report.assignedTo && (
+                  <div className="mt-2 p-3 rounded-lg bg-primary/10 border border-primary/20">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Users className="h-4 w-4 text-primary" />
+                        <div>
+                          <p className="text-sm font-medium text-card-foreground">{report.assignedTo}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {teams.find(t => t.name === report.assignedTo)?.department || "Assigned team"}
+                          </p>
+                        </div>
+                      </div>
+                      <Badge variant="default" className="bg-primary/20 text-primary border-primary/30">
+                        Assigned
+                      </Badge>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Team Selection Dropdown */}
                 <div className="relative mt-2">
                   <Button
                     variant="outline"
                     className="w-full justify-between bg-transparent"
                     onClick={() => setShowTeamDropdown(!showTeamDropdown)}
+                    disabled={isAssigningTeam}
                   >
-                    <span>{selectedTeam || "Select a team..."}</span>
-                    <ChevronDown className="h-4 w-4" />
+                    <span className={selectedTeam ? "font-medium" : "text-muted-foreground"}>
+                      {selectedTeam || (report.assignedTo ? "Change team..." : "Select a team...")}
+                    </span>
+                    <ChevronDown className={cn("h-4 w-4 transition-transform", showTeamDropdown && "rotate-180")} />
                   </Button>
                   {showTeamDropdown && (
-                    <div className="absolute top-full left-0 right-0 mt-1 bg-popover border border-border rounded-lg shadow-lg z-10 max-h-48 overflow-y-auto">
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-popover border border-border rounded-lg shadow-lg z-10 max-h-60 overflow-y-auto">
+                      {/* Unassign option */}
+                      {report.assignedTo && (
+                        <button
+                          className="w-full px-4 py-2.5 text-left hover:bg-muted transition-colors text-sm border-b border-border"
+                          onClick={() => {
+                            setSelectedTeam("")
+                            setShowTeamDropdown(false)
+                          }}
+                        >
+                          <div className="flex items-center gap-2 text-muted-foreground">
+                            <X className="h-4 w-4" />
+                            <span>Unassign Team</span>
+                          </div>
+                        </button>
+                      )}
+                      
+                      {/* Team options */}
                       {teams.map((team) => (
                         <button
                           key={team.id}
-                          className="w-full px-4 py-2 text-left hover:bg-muted transition-colors text-sm"
+                          className={cn(
+                            "w-full px-4 py-2.5 text-left hover:bg-muted transition-colors text-sm",
+                            team.name === report.assignedTo && "bg-primary/5 border-l-2 border-primary"
+                          )}
                           onClick={() => {
                             setSelectedTeam(team.name)
                             setShowTeamDropdown(false)
                           }}
                         >
                           <div className="flex items-center justify-between">
-                            <span className="font-medium text-popover-foreground">{team.name}</span>
-                            <Badge variant="outline" className="text-xs">
-                              {team.activeJobs} active
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className={cn(
+                                  "font-medium text-popover-foreground",
+                                  team.name === report.assignedTo && "text-primary"
+                                )}>
+                                  {team.name}
+                                </span>
+                                {team.name === report.assignedTo && (
+                                  <Badge variant="outline" className="text-xs border-primary/30 text-primary">
+                                    Current
+                                  </Badge>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 mt-1">
+                                <span className="text-xs text-muted-foreground">{team.department}</span>
+                                <span className="text-xs text-muted-foreground">•</span>
+                                <span className="text-xs text-muted-foreground">{team.members} members</span>
+                              </div>
+                            </div>
+                            <Badge variant="outline" className="text-xs ml-2">
+                              {team.activeJobs} jobs
                             </Badge>
                           </div>
-                          <span className="text-xs text-muted-foreground">{team.department}</span>
                         </button>
                       ))}
+                      
+                      {teams.length === 0 && (
+                        <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                          No teams available
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
               </div>
 
-              {selectedTeam && (
-                <Button 
-                  onClick={handleAssign} 
-                  className="w-full"
-                  disabled={selectedTeam === report.assignedTo}
-                >
-                  <UserPlus className="mr-2 h-4 w-4" />
-                  {report.status === "pending" ? "Assign & Start Progress" : 
-                   selectedTeam === report.assignedTo ? "Already Assigned" : 
-                   "Update Assignment"}
-                </Button>
-              )}
+              {/* Action Buttons */}
+              <div className="flex gap-2">
+                {selectedTeam && selectedTeam !== report.assignedTo && (
+                  <Button 
+                    onClick={handleAssign} 
+                    className="flex-1"
+                    disabled={isAssigningTeam || !selectedTeam}
+                  >
+                    {isAssigningTeam ? (
+                      <>
+                        <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                        Assigning...
+                      </>
+                    ) : (
+                      <>
+                        <UserPlus className="mr-2 h-4 w-4" />
+                        {report.status === "pending" ? "Assign & Start Progress" : 
+                         report.assignedTo ? "Change Assignment" : 
+                         "Assign Team"}
+                      </>
+                    )}
+                  </Button>
+                )}
+                
+                {report.assignedTo && !selectedTeam && (
+                  <Button 
+                    onClick={handleUnassign} 
+                    variant="outline"
+                    className="flex-1"
+                    disabled={isAssigningTeam}
+                  >
+                    {isAssigningTeam ? (
+                      <>
+                        <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                        Unassigning...
+                      </>
+                    ) : (
+                      <>
+                        <X className="mr-2 h-4 w-4" />
+                        Unassign Team
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Activity Log */}
-          {report.activityLog && report.activityLog.length > 0 && (
-            <div className="space-y-3 border-t border-border pt-6">
-              <h4 className="text-sm font-medium text-card-foreground flex items-center gap-2">
-                <Activity className="h-4 w-4" />
-                Activity Log
-              </h4>
+          <div className="space-y-3 border-t border-border pt-6">
+            <h4 className="text-sm font-medium text-card-foreground flex items-center gap-2">
+              <Activity className="h-4 w-4" />
+              Activity Log
+              {isLoadingActivityLog && (
+                <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
+              )}
+            </h4>
+            {isLoadingActivityLog ? (
+              <div className="flex items-center justify-center py-8">
+                <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : activityLog && activityLog.length > 0 ? (
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {report.activityLog.map((entry, index) => (
-                  <div key={entry.id} className="flex items-start gap-3 p-3 rounded-lg bg-muted/50">
+                {activityLog.map((entry, index) => (
+                  <div key={entry.id || index} className="flex items-start gap-3 p-3 rounded-lg bg-muted/50">
                     <div className="h-2 w-2 rounded-full bg-primary mt-2 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-card-foreground">{entry.action}</p>
@@ -376,12 +585,19 @@ function ReportTriageModal({
                         <span>•</span>
                         <TimeAgo date={entry.timestamp} />
                       </div>
+                      {entry.details && (
+                        <p className="text-xs text-muted-foreground mt-1">{entry.details}</p>
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="text-center py-8 text-sm text-muted-foreground">
+                No activity log entries yet
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Delete Confirmation Modal */}
@@ -494,8 +710,35 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }
   const [isLoadingMapReports, setIsLoadingMapReports] = useState(false)
   const [isMapReady, setIsMapReady] = useState(false)
   const [leafletModule, setLeafletModule] = useState<typeof import("leaflet") | null>(null)
+  const [teams, setTeams] = useState<Team[]>(mockTeams) // Fallback to mock teams
+  const [isLoadingTeams, setIsLoadingTeams] = useState(false)
   const { logout } = useAuth()
   const router = useRouter()
+  const { toast } = useToast()
+
+  // Fetch teams from database on mount
+  useEffect(() => {
+    const loadTeams = async () => {
+      setIsLoadingTeams(true)
+      try {
+        const dbTeams = await fetchAllTeams()
+        if (dbTeams.length > 0) {
+          const convertedTeams = dbTeams.map(convertTeamFromDB)
+          setTeams(convertedTeams)
+        } else {
+          // Use mock teams if database is empty
+          setTeams(mockTeams)
+        }
+      } catch (error) {
+        console.error('Failed to load teams:', error)
+        // Fallback to mock teams
+        setTeams(mockTeams)
+      } finally {
+        setIsLoadingTeams(false)
+      }
+    }
+    loadTeams()
+  }, [])
 
   // Load leaflet module on client side only
   useEffect(() => {
@@ -727,6 +970,45 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }
                 Refresh
               </Button>
             )}
+            
+            <Button 
+              variant="outline" 
+              size="sm" 
+              className="hidden sm:flex gap-2 bg-transparent"
+              onClick={async () => {
+                toast({
+                  title: "Testing Database Access...",
+                  description: "Please check console for results",
+                })
+                try {
+                  const result = await testAdminAccess()
+                  console.log("🔍 Database Access Test Results:", result)
+                  if (result.errors.length > 0) {
+                    toast({
+                      title: "Database Issues Found",
+                      description: result.errors.join("; "),
+                      variant: "destructive",
+                      duration: 10000,
+                    })
+                  } else {
+                    toast({
+                      title: "Database Access OK",
+                      description: `Read: ${result.canRead ? '✅' : '❌'}, Update: ${result.canUpdate ? '✅' : '❌'}, Assign: ${result.canAssign ? '✅' : '❌'}`,
+                      duration: 5000,
+                    })
+                  }
+                } catch (error) {
+                  toast({
+                    title: "Test Failed",
+                    description: error instanceof Error ? error.message : "Unknown error",
+                    variant: "destructive",
+                  })
+                }
+              }}
+            >
+              <Activity className="h-4 w-4" />
+              Test DB
+            </Button>
 
             <Button variant="outline" size="sm" className="hidden sm:flex gap-2 bg-transparent">
               <Download className="h-4 w-4" />
@@ -1131,7 +1413,16 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }
                                 : report.status.charAt(0).toUpperCase() + report.status.slice(1)}
                             </Badge>
                           </td>
-                          <td className="p-4 text-sm text-muted-foreground">{report.assignedTo || "-"}</td>
+                          <td className="p-4">
+                            {report.assignedTo ? (
+                              <div className="flex items-center gap-2">
+                                <Users className="h-3.5 w-3.5 text-primary" />
+                                <span className="text-sm font-medium text-card-foreground">{report.assignedTo}</span>
+                              </div>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">Unassigned</span>
+                            )}
+                          </td>
                           <td className="p-4" onClick={(e) => e.stopPropagation()}>
                             <Button size="sm" variant="ghost" onClick={() => setSelectedReport(report)}>
                               <Eye className="h-4 w-4" />
@@ -1162,16 +1453,37 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-semibold text-foreground">Response Teams</h2>
-                  <p className="text-sm text-muted-foreground">Manage and monitor field teams</p>
+                  <p className="text-sm text-muted-foreground">
+                    {isLoadingTeams ? 'Loading teams...' : `Manage and monitor ${teams.length} field teams`}
+                  </p>
                 </div>
-                <Button>
-                  <UserPlus className="mr-2 h-4 w-4" />
-                  Add Team
+                <Button onClick={async () => {
+                  // Refresh teams
+                  setIsLoadingTeams(true)
+                  try {
+                    const dbTeams = await fetchAllTeams()
+                    if (dbTeams.length > 0) {
+                      const convertedTeams = dbTeams.map(convertTeamFromDB)
+                      setTeams(convertedTeams)
+                    }
+                  } catch (error) {
+                    console.error('Failed to refresh teams:', error)
+                  } finally {
+                    setIsLoadingTeams(false)
+                  }
+                }}>
+                  <RefreshCw className={`mr-2 h-4 w-4 ${isLoadingTeams ? 'animate-spin' : ''}`} />
+                  Refresh Teams
                 </Button>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {mockTeams.map((team) => (
+              {isLoadingTeams ? (
+                <div className="flex items-center justify-center py-12">
+                  <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+                </div>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {teams.map((team) => (
                   <Card key={team.id} className="hover:shadow-lg transition-all duration-200">
                     <CardHeader className="pb-2">
                       <div className="flex items-center justify-between">
@@ -1202,8 +1514,9 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }
                       </div>
                     </CardContent>
                   </Card>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -1438,7 +1751,7 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh }
           report={selectedReport}
           onClose={() => setSelectedReport(null)}
           onStatusChange={onStatusChange}
-          teams={mockTeams}
+          teams={teams}
           onTeamAssigned={onTeamAssigned}
           onReportDeleted={() => {
             // Refresh reports will happen automatically via real-time subscription

@@ -1,34 +1,111 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { Report, ReportStatus } from '@/lib/types'
+import { fetchNotifications, markNotificationAsRead, markAllNotificationsAsRead, deleteNotification, type NotificationFromDB } from '@/src/services/notificationService'
+import { getDeviceId } from '@/src/lib/deviceId'
+import { getCurrentUser } from '@/src/services/authService'
 
 export interface Notification {
   id: string
   reportId: string
   reportTitle: string
-  type: 'status-change'
+  type: 'status-change' | 'team-assigned' | 'comment' | 'resolved'
   status: ReportStatus
-  previousStatus: ReportStatus
+  previousStatus?: ReportStatus
   timestamp: Date
   read: boolean
+  title?: string
+  message?: string
 }
 
 /**
  * Hook to manage notifications for report status changes
- * Tracks when reports change from pending -> in-progress or in-progress -> resolved
+ * Fetches notifications from database and tracks when reports change
  */
 export function useNotifications(myReports: Report[]) {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [deviceId, setDeviceId] = useState<string | null>(null)
   const previousReportsRef = useRef<Report[]>([])
 
-  // Track status changes by comparing previous and current report states
+  // Initialize user ID and device ID
   useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const device = getDeviceId()
+      setDeviceId(device)
+      
+      getCurrentUser().then((user) => {
+        setUserId(user?.id || null)
+      }).catch(() => {
+        setUserId(null)
+      })
+    }
+  }, [])
+
+  // Fetch notifications from database
+  useEffect(() => {
+    if (!userId && !deviceId) return
+
+    const loadNotifications = async () => {
+      try {
+        const dbNotifications = await fetchNotifications(userId, deviceId)
+        
+        // Convert database notifications to app notifications
+        const convertedNotifications: Notification[] = dbNotifications.map((dbNotif) => {
+          // Find the report to get the title
+          const report = myReports.find((r) => r.id === dbNotif.report_id)
+          
+          // Map status
+          const statusMap: Record<string, ReportStatus> = {
+            'Pending': 'pending',
+            'In Progress': 'in-progress',
+            'Resolved': 'resolved',
+            'pending': 'pending',
+            'in-progress': 'in-progress',
+            'resolved': 'resolved',
+          }
+          
+          return {
+            id: dbNotif.id,
+            reportId: dbNotif.report_id,
+            reportTitle: report?.title || dbNotif.title,
+            type: dbNotif.type as Notification['type'],
+            status: statusMap[dbNotif.status || ''] || 'pending',
+            timestamp: new Date(dbNotif.created_at),
+            read: dbNotif.read,
+            title: dbNotif.title,
+            message: dbNotif.message,
+          }
+        })
+
+        setNotifications(convertedNotifications)
+        setUnreadCount(convertedNotifications.filter((n) => !n.read).length)
+      } catch (error) {
+        console.error('Failed to load notifications:', error)
+        // Fallback to client-side tracking if database fails
+        trackNotificationsClientSide()
+      }
+    }
+
+    loadNotifications()
+    
+    // Also track client-side changes as fallback
+    const interval = setInterval(() => {
+      if (userId || deviceId) {
+        loadNotifications()
+      }
+    }, 30000) // Refresh every 30 seconds
+
+    return () => clearInterval(interval)
+  }, [userId, deviceId, myReports])
+
+  // Fallback: Track status changes by comparing previous and current report states
+  const trackNotificationsClientSide = useCallback(() => {
     const previousReports = previousReportsRef.current
     const currentReports = myReports
 
-    // Skip on initial load (when previousReports is empty)
+    // Skip on initial load
     if (previousReports.length === 0) {
-      console.log('📋 Initializing notifications with', currentReports.length, 'reports')
       previousReportsRef.current = [...currentReports]
       return
     }
@@ -39,14 +116,6 @@ export function useNotifications(myReports: Report[]) {
       const previousReport = previousReports.find((r) => r.id === currentReport.id)
       
       if (previousReport && previousReport.status !== currentReport.status) {
-        // Status changed - create notification
-        console.log('🔔 Status change detected:', {
-          reportId: currentReport.id.substring(0, 8) + '...',
-          title: currentReport.title,
-          oldStatus: previousReport.status,
-          newStatus: currentReport.status
-        })
-        
         const notification: Notification = {
           id: `${currentReport.id}-${Date.now()}-${Math.random()}`,
           reportId: currentReport.id,
@@ -58,86 +127,85 @@ export function useNotifications(myReports: Report[]) {
           read: false,
         }
 
-        // Only notify for meaningful status changes
         if (
           (previousReport.status === 'pending' && currentReport.status === 'in-progress') ||
           (previousReport.status === 'in-progress' && currentReport.status === 'resolved') ||
           (previousReport.status === 'pending' && currentReport.status === 'resolved')
         ) {
-          console.log('✅ Creating notification for status change:', notification)
-          newNotifications.push(notification)
-        } else {
-          console.log('⏭️ Skipping notification (not a meaningful status change)')
-        }
-      }
-    })
-
-    // Also check for new reports that were added
-    currentReports.forEach((currentReport) => {
-      const wasInPrevious = previousReports.some((r) => r.id === currentReport.id)
-      if (!wasInPrevious && currentReport.status !== 'pending') {
-        // New report with non-pending status (shouldn't happen, but handle it)
-        const notification: Notification = {
-          id: `${currentReport.id}-${Date.now()}-${Math.random()}`,
-          reportId: currentReport.id,
-          reportTitle: currentReport.title,
-          type: 'status-change',
-          status: currentReport.status,
-          previousStatus: 'pending',
-          timestamp: new Date(),
-          read: false,
-        }
-        if (currentReport.status === 'in-progress' || currentReport.status === 'resolved') {
           newNotifications.push(notification)
         }
       }
     })
 
     if (newNotifications.length > 0) {
-      console.log(`🔔 Adding ${newNotifications.length} new notification(s)`)
-      setNotifications((prev) => {
-        const updated = [...newNotifications, ...prev].slice(0, 50) // Limit to 50 notifications
-        console.log(`📬 Total notifications: ${updated.length}`)
-        return updated
-      })
-      setUnreadCount((prev) => {
-        const newCount = prev + newNotifications.length
-        console.log(`🔴 Unread count: ${newCount}`)
-        return newCount
-      })
-    } else if (currentReports.length !== previousReports.length) {
-      // Reports count changed but no status changes - just log it
-      console.log('📊 Reports count changed:', previousReports.length, '→', currentReports.length)
+      setNotifications((prev) => [...newNotifications, ...prev].slice(0, 50))
+      setUnreadCount((prev) => prev + newNotifications.length)
     }
 
-    // Update ref for next comparison
     previousReportsRef.current = [...currentReports]
   }, [myReports])
 
   // Mark notification as read
-  const markAsRead = useCallback((notificationId: string) => {
+  const markAsRead = useCallback(async (notificationId: string) => {
+    // Optimistically update UI
     setNotifications((prev) => {
       const updated = prev.map((n) => (n.id === notificationId ? { ...n, read: true } : n))
       const newUnreadCount = updated.filter((n) => !n.read).length
       setUnreadCount(newUnreadCount)
       return updated
     })
+    
+    // Update in database
+    try {
+      await markNotificationAsRead(notificationId)
+    } catch (error) {
+      console.error('Failed to mark notification as read:', error)
+      // Revert on error
+      setNotifications((prev) => {
+        const updated = prev.map((n) => (n.id === notificationId ? { ...n, read: false } : n))
+        setUnreadCount(updated.filter((n) => !n.read).length)
+        return updated
+      })
+    }
   }, [])
 
   // Mark all as read
-  const markAllAsRead = useCallback(() => {
+  const markAllAsRead = useCallback(async () => {
+    // Optimistically update UI
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })))
     setUnreadCount(0)
-  }, [])
+    
+    // Update in database
+    try {
+      await markAllNotificationsAsRead(userId, deviceId)
+    } catch (error) {
+      console.error('Failed to mark all notifications as read:', error)
+    }
+  }, [userId, deviceId])
 
   // Clear all notifications
-  const clearAll = useCallback(() => {
+  const clearAll = useCallback(async () => {
+    // Delete all notifications from database
+    try {
+      for (const notification of notifications) {
+        await deleteNotification(notification.id)
+      }
+    } catch (error) {
+      console.error('Failed to delete notifications:', error)
+    }
+    
     setNotifications([])
     setUnreadCount(0)
-  }, [])
+  }, [notifications])
 
   // Get notification message
   const getNotificationMessage = useCallback((notification: Notification): string => {
+    // Use message from database if available
+    if (notification.message) {
+      return notification.message
+    }
+    
+    // Fallback to generated messages
     if (notification.type === 'status-change') {
       if (notification.status === 'in-progress') {
         return `Your report "${notification.reportTitle}" is now in progress!`
@@ -146,6 +214,11 @@ export function useNotifications(myReports: Report[]) {
         return `Your report "${notification.reportTitle}" has been resolved! 🎉`
       }
     }
+    
+    if (notification.type === 'team-assigned') {
+      return `A team has been assigned to handle your report "${notification.reportTitle}".`
+    }
+    
     return `Your report "${notification.reportTitle}" status was updated.`
   }, [])
 
@@ -158,3 +231,5 @@ export function useNotifications(myReports: Report[]) {
     getNotificationMessage,
   }
 }
+
+

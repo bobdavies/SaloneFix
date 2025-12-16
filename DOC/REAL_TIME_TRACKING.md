@@ -206,3 +206,5 @@ ALTER PUBLICATION supabase_realtime ADD TABLE reports;
 - All database operations are validated server-side
 
 
+
+

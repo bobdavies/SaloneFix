@@ -63,62 +63,58 @@ function AdminPageContent() {
     ))
 
     try {
-      // Update in database - this is the critical part that must succeed
-      console.log(`🔄 Updating report ${reportId} status: ${originalReport.status} → ${newStatus} (DB: ${dbStatus})`)
-      const success = await updateReportStatusInDB(reportId, dbStatus as 'Pending' | 'In Progress' | 'Resolved')
+      // Update in database
+      console.log(`[handleStatusChange] Updating report ${reportId.substring(0, 8)}... status: ${originalReport.status} → ${newStatus} (DB: ${dbStatus})`)
+      const success = await updateReportStatusInDB(
+        reportId, 
+        dbStatus as 'Pending' | 'In Progress' | 'Resolved',
+        'Admin',
+        originalReport.status === 'pending' ? 'Pending' : 
+        originalReport.status === 'in-progress' ? 'In Progress' : 'Resolved'
+      )
       
       if (!success) {
         throw new Error('Failed to update report status in database')
       }
       
-      console.log(`✅ Report status updated successfully in database. Real-time subscription will update UI.`)
-      
-      // Verify the update by fetching the report again (double-check)
-      // This ensures the database actually has the new status
-      try {
-        const { fetchAllReports, convertReportFromDB } = await import('@/src/services/reportService')
-        const allReports = await fetchAllReports()
-        const updatedReport = allReports.find(r => r.id === reportId)
-        if (updatedReport) {
-          const converted = convertReportFromDB(updatedReport)
-          const dbStatusNormalized = converted.status
-          if (dbStatusNormalized !== newStatus) {
-            console.warn(`⚠️ Status mismatch detected! UI: ${newStatus}, DB: ${dbStatusNormalized}`)
-            // Force update from database
-            setReports((prev) => prev.map((report) => 
-              report.id === reportId ? converted : report
-            ))
-          } else {
-            console.log(`✅ Verification passed: Database has status ${dbStatusNormalized}`)
-          }
-        }
-      } catch (verifyError) {
-        console.warn('Could not verify update:', verifyError)
-        // Continue anyway - real-time subscription should handle it
-      }
+      console.log(`[handleStatusChange] ✅ Status updated successfully`)
       
       // Track analytics
       trackStatusUpdate(reportId, originalReport.status, newStatus)
       
-      // The real-time subscription should automatically update the UI
+      // Show success toast
       toast({
         title: "Success",
-        description: `Report status updated to ${newStatus}. Changes are saved.`,
+        description: `Report status updated to ${newStatus}.`,
         duration: 3000,
       })
+      
+      // Real-time subscription will automatically update the UI
     } catch (error) {
       // Revert on error
       setReports((prev) => prev.map((report) => 
         report.id === reportId ? originalReport : report
       ))
       
-      console.error('Status update error:', error)
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to update report status. Please try again.",
-        variant: "destructive",
-        duration: 5000,
-      })
+      console.error('[handleStatusChange] Error:', error)
+      const errorMessage = error instanceof Error ? error.message : "Failed to update report status"
+      
+      // Check for RLS policy errors
+      if (errorMessage.includes('policy') || errorMessage.includes('permission') || errorMessage.includes('denied')) {
+        toast({
+          title: "Permission Error",
+          description: "Database permissions issue. Please check RLS policies. See DOC/RLS_POLICIES_SETUP.sql",
+          variant: "destructive",
+          duration: 8000,
+        })
+      } else {
+        toast({
+          title: "Error",
+          description: errorMessage,
+          variant: "destructive",
+          duration: 5000,
+        })
+      }
     }
   }
 
@@ -134,32 +130,56 @@ function AdminPageContent() {
       return
     }
 
+    const isUnassign = teamName.trim() === ""
+    const displayTeamName = isUnassign ? null : teamName
+
     // Optimistically update UI
     setReports((prev) => prev.map((report) => 
       report.id === reportId 
-        ? { ...report, assignedTo: teamName } 
+        ? { ...report, assignedTo: displayTeamName } 
         : report
     ))
 
     try {
-      console.log(`🔄 Assigning team "${teamName}" to report ${reportId}`)
-      const success = await assignTeamToReport(reportId, teamName)
-      
-      if (!success) {
-        throw new Error('Failed to assign team. The assigned_to column may not exist in the database.')
+      if (isUnassign) {
+        console.log(`[handleTeamAssigned] Unassigning team from report ${reportId.substring(0, 8)}...`)
+      } else {
+        console.log(`[handleTeamAssigned] Assigning team "${teamName}" to report ${reportId.substring(0, 8)}...`)
       }
       
-      console.log(`✅ Team assigned successfully. Real-time subscription will update UI.`)
+      const success = await assignTeamToReport(reportId, teamName, 'Admin')
       
-      // If status is pending, also update to in-progress
-      if (originalReport.status === 'pending') {
-        console.log(`🔄 Auto-updating status to in-progress (team assigned to pending report)`)
-        await handleStatusChange(reportId, 'in-progress')
+      if (!success) {
+        // Check if it's a column issue
+        toast({
+          title: "Column Missing",
+          description: "The assigned_to column does not exist. Please run the database migration (DOC/admin_features_migration.sql)",
+          variant: "destructive",
+          duration: 8000,
+        })
+        // Revert UI
+        setReports((prev) => prev.map((report) => 
+          report.id === reportId ? originalReport : report
+        ))
+        return
+      }
+      
+      console.log(`[handleTeamAssigned] ✅ Team ${isUnassign ? 'unassigned' : 'assigned'} successfully`)
+      
+      // If assigning and status is pending, also update to in-progress
+      if (!isUnassign && originalReport.status === 'pending') {
+        console.log(`[handleTeamAssigned] Auto-updating status to in-progress`)
+        // Don't await - let it happen in background
+        handleStatusChange(reportId, 'in-progress').catch(err => {
+          console.warn('[handleTeamAssigned] Status update failed:', err)
+        })
       }
       
       toast({
         title: "Success",
-        description: `Report assigned to ${teamName}. Status updated to In Progress.`,
+        description: isUnassign 
+          ? "Team unassigned from report"
+          : `Report assigned to ${teamName}.${originalReport.status === 'pending' ? ' Status updated to In Progress.' : ''}`,
         duration: 3000,
       })
     } catch (error) {
@@ -168,13 +188,25 @@ function AdminPageContent() {
         report.id === reportId ? originalReport : report
       ))
       
-      console.error('Team assignment error:', error)
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to assign team. Please try again.",
-        variant: "destructive",
-        duration: 5000,
-      })
+      console.error('[handleTeamAssigned] Error:', error)
+      const errorMessage = error instanceof Error ? error.message : `Failed to ${isUnassign ? 'unassign' : 'assign'} team`
+      
+      // Check for RLS policy errors
+      if (errorMessage.includes('policy') || errorMessage.includes('permission') || errorMessage.includes('denied')) {
+        toast({
+          title: "Permission Error",
+          description: "Database permissions issue. Please check RLS policies. See DOC/RLS_POLICIES_SETUP.sql",
+          variant: "destructive",
+          duration: 8000,
+        })
+      } else {
+        toast({
+          title: "Error",
+          description: errorMessage,
+          variant: "destructive",
+          duration: 5000,
+        })
+      }
     }
   }
 

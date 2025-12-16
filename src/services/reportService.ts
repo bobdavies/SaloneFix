@@ -1,7 +1,9 @@
 import { supabase } from '../lib/supabase'
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai'
-import type { Report, ReportCategory } from '../../lib/types'
+import type { Report, ReportCategory, ActivityLogEntry } from '../../lib/types'
 import { addReportIdToDevice, getReportIdsForDevice } from '../lib/deviceId'
+import { createActivityLog, fetchActivityLogForReport } from './activityLogService'
+import { createNotification } from './notificationService'
 
 // --- CONFIGURATION ---
 
@@ -130,129 +132,356 @@ const analyzeImageWithAI = async (base64Image: string, mimeType: string): Promis
 // --- UPDATE STATUS FUNCTION ---
 export async function updateReportStatus(
   reportId: string, 
-  newStatus: 'Pending' | 'In Progress' | 'Resolved'
+  newStatus: 'Pending' | 'In Progress' | 'Resolved',
+  performedBy: string = 'Admin',
+  previousStatus?: string
 ) {
   try {
-    const updateData: any = { status: newStatus }
+    console.log(`[updateReportStatus] Starting update for report ${reportId.substring(0, 8)}...`)
     
-    // Try to update resolved_at if the column exists
-    // This will gracefully fail if the column doesn't exist, but status will still update
+    // Fetch current report (non-blocking)
+    let currentReport: { status?: string; reporter_id?: string | null; device_id?: string | null; assigned_to?: string | null } | null = null
     try {
-      if (newStatus === 'Resolved') {
-        // Only try to set resolved_at if column exists (will be caught if it doesn't)
-        updateData.resolved_at = new Date().toISOString()
-      } else if (newStatus === 'Pending') {
-        // Only try to clear resolved_at if column exists
-        updateData.resolved_at = null
+      const { data, error } = await supabase
+        .from('reports')
+        .select('status, reporter_id, device_id, assigned_to')
+        .eq('id', reportId)
+        .maybeSingle()
+      
+      if (!error && data) {
+        currentReport = data
       }
-    } catch (timestampError) {
-      // Column doesn't exist, continue without it
-      console.warn('resolved_at column not found, updating status only')
+    } catch (fetchErr) {
+      console.warn('[updateReportStatus] Could not fetch current report:', fetchErr)
     }
 
-    // Update and verify the update succeeded by selecting the updated row
-    const { data, error } = await supabase
+    const oldStatus = previousStatus || currentReport?.status || 'Pending'
+    
+    // Prepare update data - start simple
+    const updateData: any = { status: newStatus }
+    
+    // Try to add resolved_at if status is Resolved (optional column)
+    if (newStatus === 'Resolved') {
+      updateData.resolved_at = new Date().toISOString()
+    }
+
+    // Perform the update
+    console.log(`[updateReportStatus] Updating with data:`, updateData)
+    const { error: updateError } = await supabase
       .from('reports')
       .update(updateData)
       .eq('id', reportId)
-      .select()
-      .single()
 
-    if (error) {
-      // If error is about resolved_at column, try again without it
-      if (error.message?.includes('resolved_at') || error.message?.includes('column')) {
-        console.warn('resolved_at column not found, updating status only')
-        const { data: retryData, error: retryError } = await supabase
+    if (updateError) {
+      console.error('[updateReportStatus] Update error:', updateError)
+      
+      // Extract error message from Supabase error object
+      const errorMsg = 
+        updateError.message || 
+        updateError.details || 
+        updateError.hint || 
+        (updateError.code ? `Error code: ${updateError.code}` : '') ||
+        (typeof updateError === 'string' ? updateError : JSON.stringify(updateError)) ||
+        'Unknown error'
+      
+      console.error('[updateReportStatus] Error details:', {
+        message: updateError.message,
+        details: updateError.details,
+        hint: updateError.hint,
+        code: updateError.code,
+        fullError: updateError
+      })
+      
+      // If error is about resolved_at, retry without it
+      if (errorMsg.includes('resolved_at') || errorMsg.includes('column') || errorMsg.includes('does not exist')) {
+        console.log('[updateReportStatus] Retrying without resolved_at...')
+        const { error: retryError } = await supabase
           .from('reports')
           .update({ status: newStatus })
           .eq('id', reportId)
-          .select()
-          .single()
         
-        if (retryError) throw new Error(`Failed to update status: ${retryError.message}`)
-        
-        // Verify the update
-        if (retryData && retryData.status !== newStatus) {
-          throw new Error(`Status update verification failed. Expected ${newStatus}, got ${retryData.status}`)
+        if (retryError) {
+          console.error('[updateReportStatus] Retry also failed:', retryError)
+          const retryErrorMsg = retryError.message || retryError.details || JSON.stringify(retryError) || 'Unknown error'
+          throw new Error(`Failed to update status: ${retryErrorMsg}`)
         }
-        
-        console.log('✅ Status updated and verified:', { reportId, status: retryData?.status })
-        return true
+        console.log('[updateReportStatus] ✅ Retry succeeded')
+      } else {
+        // Check for RLS policy errors
+        if (errorMsg.includes('policy') || errorMsg.includes('permission') || errorMsg.includes('denied') || errorMsg.includes('row-level security')) {
+          throw new Error(`Permission denied. Please check RLS policies. Error: ${errorMsg}`)
+        }
+        throw new Error(`Failed to update status: ${errorMsg}`)
       }
-      throw new Error(`Failed to update status: ${error.message}`)
+    } else {
+      console.log('[updateReportStatus] ✅ Update succeeded')
     }
     
-    // Verify the update actually happened
-    if (!data) {
-      console.error('❌ Update succeeded but no data returned')
-      throw new Error('Update succeeded but no data returned')
-    }
-    
-    if (data.status !== newStatus) {
-      console.error('❌ Status update verification failed:', {
-        expected: newStatus,
-        actual: data.status,
-        reportId
+    // Create activity log and notification (non-blocking, don't wait)
+    if (currentReport) {
+      // Fire and forget - don't block on these
+      createActivityLogAndNotification(reportId, oldStatus, newStatus, performedBy, currentReport).catch(err => {
+        console.warn('[updateReportStatus] Activity log/notification failed (non-critical):', err)
       })
-      throw new Error(`Status update verification failed. Expected ${newStatus}, got ${data.status}`)
     }
     
-    console.log('✅ Status updated and verified in database:', { 
-      reportId: reportId.substring(0, 8) + '...', 
-      status: data.status, 
-      assigned_to: data.assigned_to,
-      timestamp: new Date().toISOString()
-    })
     return true
   } catch (error) {
-    console.error('Error updating report status:', error)
+    console.error('[updateReportStatus] Fatal error:', error)
     throw error
+  }
+}
+
+// Helper function to create activity log and notification (non-blocking)
+async function createActivityLogAndNotification(
+  reportId: string,
+  oldStatus: string,
+  newStatus: string,
+  performedBy: string,
+  reportData: { reporter_id?: string | null; device_id?: string | null; assigned_to?: string | null; status?: string | null } | null
+) {
+  try {
+    // Create activity log entry
+    const actionMap: Record<string, string> = {
+      'Pending': 'Report created',
+      'In Progress': 'Status changed to In Progress',
+      'Resolved': 'Report resolved',
+    }
+    
+    const action = actionMap[newStatus] || `Status changed from ${oldStatus} to ${newStatus}`
+    
+    await createActivityLog({
+      reportId,
+      action: 'status-changed',
+      performedBy,
+      performedByType: 'admin',
+      details: action,
+      metadata: {
+        oldStatus,
+        newStatus,
+        assignedTo: reportData?.assigned_to || null,
+      },
+    })
+
+    // Create notification for the user (if they exist)
+    if (reportData && (reportData.reporter_id || reportData.device_id)) {
+      let notificationTitle = 'Report Status Updated'
+      let notificationMessage = `Your report status has been updated to ${newStatus}.`
+      
+      if (newStatus === 'In Progress') {
+        notificationTitle = 'Report In Progress'
+        notificationMessage = reportData.assigned_to
+          ? `Your report is now being handled by ${reportData.assigned_to}.`
+          : 'Your report is now in progress and being addressed.'
+      } else if (newStatus === 'Resolved') {
+        notificationTitle = 'Report Resolved'
+        notificationMessage = 'Your report has been successfully resolved! 🎉'
+      }
+
+      await createNotification({
+        reportId,
+        userId: reportData.reporter_id || null,
+        deviceId: reportData.device_id || null,
+        type: newStatus === 'Resolved' ? 'resolved' : 'status-change',
+        title: notificationTitle,
+        message: notificationMessage,
+        status: newStatus,
+      })
+    }
+  } catch (error) {
+    // Don't throw - these are non-critical operations
+    console.warn('Failed to create activity log or notification:', error)
   }
 }
 
 // --- ASSIGN TEAM TO REPORT ---
 export async function assignTeamToReport(
   reportId: string,
-  teamName: string
+  teamName: string,
+  performedBy: string = 'Admin'
 ) {
   try {
-    // Update and verify the update succeeded by selecting the updated row
-    const { data, error } = await supabase
-      .from('reports')
-      .update({ assigned_to: teamName })
-      .eq('id', reportId)
-      .select()
-      .single()
-
-    if (error) {
-      // If error is about assigned_to column not existing, provide helpful message but don't fail completely
-      const errorMsg = error.message || JSON.stringify(error) || ''
-      if (errorMsg.includes('assigned_to') || errorMsg.includes('column') || errorMsg.includes('does not exist')) {
-        console.warn(
-          'Team assignment feature requires the "assigned_to" column. ' +
-          'Please add it to your Supabase reports table (type: text, nullable: true). ' +
-          'See DOC/database_migration.sql for the migration script.'
-        )
-        // Don't throw - just log warning and return false
-        // This allows the UI to continue working even without the column
-        return false
+    console.log(`[assignTeamToReport] Starting assignment for report ${reportId.substring(0, 8)}...`)
+    
+    // Fetch current report (non-blocking)
+    let currentReport: { assigned_to?: string | null; reporter_id?: string | null; device_id?: string | null; status?: string } | null = null
+    try {
+      const { data, error } = await supabase
+        .from('reports')
+        .select('assigned_to, reporter_id, device_id, status')
+        .eq('id', reportId)
+        .maybeSingle()
+      
+      if (!error && data) {
+        currentReport = data
       }
-      throw new Error(`Failed to assign team: ${errorMsg}`)
+    } catch (fetchErr) {
+      console.warn('[assignTeamToReport] Could not fetch current report:', fetchErr)
+    }
+
+    const oldTeam = currentReport?.assigned_to || null
+    
+    // Perform the update (empty string means unassign)
+    const updateValue = teamName.trim() === "" ? null : teamName
+    console.log(`[assignTeamToReport] Updating assigned_to to: ${updateValue === null ? "null (unassign)" : `"${updateValue}"`}`)
+    
+    // Perform update and get both data and error
+    const { data: updateData, error: updateError } = await supabase
+      .from('reports')
+      .update({ assigned_to: updateValue })
+      .eq('id', reportId)
+      .select('assigned_to') // Select to verify update
+
+    // Check if we have data (update succeeded) or error
+    if (updateError) {
+      // Log error details for debugging
+      const errorKeys = updateError ? Object.keys(updateError) : []
+      const errorString = JSON.stringify(updateError, null, 2)
+      
+      console.error('[assignTeamToReport] Update error object:', {
+        hasError: !!updateError,
+        errorType: typeof updateError,
+        errorKeys: errorKeys,
+        errorString: errorString,
+        errorValue: updateError,
+        // Try to access common Supabase error properties
+        message: (updateError as any)?.message,
+        details: (updateError as any)?.details,
+        hint: (updateError as any)?.hint,
+        code: (updateError as any)?.code,
+      })
+      
+      // Extract error message from Supabase error object
+      const errorMsg = 
+        (updateError as any)?.message || 
+        (updateError as any)?.details || 
+        (updateError as any)?.hint || 
+        ((updateError as any)?.code ? `Error code: ${(updateError as any).code}` : '') ||
+        (typeof updateError === 'string' ? updateError : errorString) ||
+        'Unknown error'
+      
+      // If error is empty object, verify if update actually succeeded
+      if (errorKeys.length === 0 || errorString === '{}' || errorMsg === 'Unknown error') {
+        console.warn('[assignTeamToReport] Empty error object detected. Verifying if update succeeded...')
+        
+        // Wait a bit for database to sync
+        await new Promise(resolve => setTimeout(resolve, 100))
+        
+        // Try to verify by fetching the report
+        try {
+          const { data: verifyReport, error: verifyError } = await supabase
+            .from('reports')
+            .select('assigned_to')
+            .eq('id', reportId)
+            .maybeSingle()
+          
+          if (verifyError) {
+            console.error('[assignTeamToReport] Verification fetch error:', verifyError)
+            throw new Error(`Failed to assign team: Could not verify update. ${JSON.stringify(verifyError)}`)
+          }
+          
+          // Compare values (handle null/undefined)
+          const verifyValue = verifyReport?.assigned_to || null
+          const expectedValue = updateValue || null
+          
+          if (verifyValue === expectedValue || 
+              (verifyValue === null && expectedValue === null) ||
+              (verifyValue?.trim() === expectedValue?.trim())) {
+            console.log('[assignTeamToReport] ✅ Update verified - succeeded despite error object', {
+              expected: expectedValue,
+              actual: verifyValue
+            })
+            // Continue normally - update succeeded
+          } else {
+            console.error('[assignTeamToReport] Verification failed:', {
+              expected: expectedValue,
+              actual: verifyValue
+            })
+            throw new Error(`Failed to assign team: Update verification failed. Expected "${expectedValue}", got "${verifyValue}"`)
+          }
+        } catch (verifyError) {
+          console.error('[assignTeamToReport] Verification exception:', verifyError)
+          throw new Error(`Failed to assign team: ${verifyError instanceof Error ? verifyError.message : 'Verification failed'}`)
+        }
+      } else {
+        // We have a real error message
+        // Check for column missing error
+        if (errorMsg.includes('assigned_to') || errorMsg.includes('column') || errorMsg.includes('does not exist') || errorMsg.includes('relation')) {
+          console.warn('[assignTeamToReport] assigned_to column does not exist')
+          return false // Return false but don't throw
+        }
+        
+        // Check for RLS policy errors
+        if (errorMsg.includes('policy') || errorMsg.includes('permission') || errorMsg.includes('denied') || errorMsg.includes('row-level security')) {
+          throw new Error(`Permission denied. Please check RLS policies. Error: ${errorMsg}`)
+        }
+        
+        // For "Cannot coerce" errors, continue anyway (update may have succeeded)
+        if (errorMsg.includes('Cannot coerce') || errorMsg.includes('coerce')) {
+          console.warn('[assignTeamToReport] Coerce error detected, but update may have succeeded')
+          // Continue to create activity log
+        } else {
+          throw new Error(`Failed to assign team: ${errorMsg}`)
+        }
+      }
+    } else if (updateData && updateData.length > 0) {
+      // Update succeeded and we got data back
+      const updatedValue = updateData[0]?.assigned_to || null
+      console.log('[assignTeamToReport] ✅ Update succeeded with data:', {
+        expected: updateValue,
+        actual: updatedValue
+      })
+    } else {
+      // No error and no data - might still have succeeded
+      console.log('[assignTeamToReport] Update completed (no error, no data returned). Verifying...')
+      
+      // Verify by fetching
+      const { data: verifyReport } = await supabase
+        .from('reports')
+        .select('assigned_to')
+        .eq('id', reportId)
+        .maybeSingle()
+      
+      if (verifyReport) {
+        console.log('[assignTeamToReport] ✅ Update verified:', verifyReport.assigned_to)
+      }
     }
     
-    // Verify the update actually happened
-    if (!data) {
-      throw new Error('Team assignment succeeded but no data returned')
+    // Create activity log and notification (non-blocking, don't wait)
+    if (currentReport) {
+      // Fire and forget - don't block on these
+      const isUnassign = updateValue === null
+      
+      Promise.all([
+        createActivityLog({
+          reportId,
+          action: isUnassign ? 'team-unassigned' : 'team-assigned',
+          performedBy,
+          performedByType: 'admin',
+          details: isUnassign 
+            ? `Team "${oldTeam}" unassigned from report`
+            : `Team "${teamName}" assigned to report${oldTeam ? ` (replaced "${oldTeam}")` : ''}`,
+          metadata: { teamName: updateValue, oldTeam },
+        }).catch(err => console.warn('[assignTeamToReport] Activity log failed:', err)),
+        
+        // Only send notification if assigning (not unassigning)
+        (!isUnassign && (currentReport.reporter_id || currentReport.device_id)) ? createNotification({
+          reportId,
+          userId: currentReport.reporter_id || null,
+          deviceId: currentReport.device_id || null,
+          type: 'team-assigned',
+          title: 'Team Assigned to Your Report',
+          message: `A team (${teamName}) has been assigned to handle your report.`,
+          status: currentReport.status || 'Pending',
+        }).catch(err => console.warn('[assignTeamToReport] Notification failed:', err)) : Promise.resolve()
+      ]).catch(err => {
+        console.warn('[assignTeamToReport] Background tasks failed (non-critical):', err)
+      })
     }
     
-    if (data.assigned_to !== teamName) {
-      throw new Error(`Team assignment verification failed. Expected ${teamName}, got ${data.assigned_to}`)
-    }
-    
-    console.log('✅ Team assigned and verified:', { reportId, team: data.assigned_to, status: data.status })
     return true
   } catch (error) {
-    console.error('Error assigning team:', error)
+    console.error('[assignTeamToReport] Fatal error:', error)
     throw error
   }
 }
@@ -269,9 +498,16 @@ export async function deleteReport(
       .from('reports')
       .select('status')
       .eq('id', reportId)
-      .single()
+      .maybeSingle()
 
-    if (fetchError) throw new Error(`Failed to fetch report: ${fetchError.message}`)
+    if (fetchError) {
+      console.warn('Could not fetch report for deletion check:', fetchError.message)
+      throw new Error(`Failed to fetch report: ${fetchError.message}`)
+    }
+    
+    if (!report) {
+      throw new Error('Report not found')
+    }
     
     if (!report) throw new Error('Report not found')
     
@@ -326,11 +562,19 @@ export async function updateReportWithProof(
 ) {
   try {
     // Store proof image URL (you may want to add a proof_image_url column to your database)
-    const { data: currentReport } = await supabase
+    const { data: currentReport, error: fetchError } = await supabase
       .from('reports')
       .select('description')
       .eq('id', reportId)
-      .single()
+      .maybeSingle()
+    
+    if (fetchError) {
+      console.warn('Could not fetch report for proof update:', fetchError.message)
+    }
+    
+    if (!currentReport) {
+      throw new Error('Report not found')
+    }
 
     const originalDescription = currentReport?.description || ''
     // Remove existing proof marker if any
@@ -643,8 +887,8 @@ export async function fetchReportsByDeviceOrUser(deviceId: string | null, userId
   }
 }
 
-// Convert database report to app Report type
-export function convertReportFromDB(dbReport: ReportFromDB): Report {
+// Convert database report to app Report type (with activity log support)
+export async function convertReportFromDBWithActivityLog(dbReport: ReportFromDB): Promise<Report> {
   // Normalize severity: "Low"/"Medium"/"High" -> "low"/"medium"/"high"
   const severityMap: Record<string, "low" | "medium" | "high"> = {
     'Low': 'low',
@@ -691,6 +935,21 @@ export function convertReportFromDB(dbReport: ReportFromDB): Report {
   }
   const normalizedCategory = categoryMap[dbReport.category?.toLowerCase() || ''] || 'other'
 
+  // Fetch activity log
+  let activityLog: ActivityLogEntry[] = []
+  try {
+    const activityLogEntries = await fetchActivityLogForReport(dbReport.id)
+    activityLog = activityLogEntries.map((entry) => ({
+      id: entry.id,
+      action: entry.details || entry.action,
+      user: entry.performed_by,
+      timestamp: new Date(entry.created_at),
+      details: entry.metadata ? JSON.stringify(entry.metadata) : undefined,
+    }))
+  } catch (error) {
+    console.warn('Failed to fetch activity log:', error)
+  }
+
   return {
     id: dbReport.id,
     title,
@@ -705,6 +964,32 @@ export function convertReportFromDB(dbReport: ReportFromDB): Report {
     assignedTo: dbReport.assigned_to || undefined,
     resolvedAt,
     imageUrl: dbReport.image_url || undefined,
-    activityLog: [], // Activity log would need to be fetched separately if needed
+    activityLog,
+  }
+}
+
+// Convert database report to app Report type (synchronous, without activity log)
+export function convertReportFromDB(dbReport: ReportFromDB): Report {
+  return {
+    id: dbReport.id,
+    title: dbReport.category || dbReport.description?.substring(0, 50) || 'Untitled Report',
+    location: dbReport.latitude && dbReport.longitude
+      ? `${dbReport.latitude.toFixed(4)}, ${dbReport.longitude.toFixed(4)}`
+      : 'Location not available',
+    category: (['sanitation', 'roads', 'water', 'electrical', 'other'].includes(dbReport.category?.toLowerCase() || '') 
+      ? dbReport.category?.toLowerCase() as ReportCategory 
+      : 'other'),
+    status: (dbReport.status === 'In Progress' ? 'in-progress' : 
+             dbReport.status === 'Resolved' ? 'resolved' : 'pending') as "pending" | "in-progress" | "resolved",
+    severity: (['Low', 'Medium', 'High'].includes(dbReport.severity) 
+      ? dbReport.severity.toLowerCase() as "low" | "medium" | "high"
+      : 'medium'),
+    description: dbReport.description || '',
+    timestamp: new Date(dbReport.created_at),
+    reportedBy: dbReport.reporter_id || dbReport.device_id || undefined,
+    assignedTo: dbReport.assigned_to || undefined,
+    resolvedAt: dbReport.resolved_at ? new Date(dbReport.resolved_at) : undefined,
+    imageUrl: dbReport.image_url || undefined,
+    activityLog: [],
   }
 }

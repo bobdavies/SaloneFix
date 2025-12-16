@@ -169,3 +169,5 @@ localStorage.setItem('debug', 'true')
 ```
 
 Then refresh the page and check console for detailed logs.
+
+

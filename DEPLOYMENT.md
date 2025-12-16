@@ -63,3 +63,5 @@ After deployment, Vercel will provide you with:
 - Ensure all variables start with `NEXT_PUBLIC_` for client-side access
 - Restart the deployment after adding new variables
 - Check variable names match exactly (case-sensitive)
+
+

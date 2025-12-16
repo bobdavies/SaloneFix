@@ -3,7 +3,7 @@
  * Run these from browser console to diagnose issues
  */
 
-import { supabase } from './lib/supabase'
+import { supabase } from '../lib/supabase'
 
 /**
  * Test if we can read from the reports table
@@ -151,3 +151,5 @@ if (typeof window !== 'undefined') {
   }
   console.log('🧪 Database test functions available. Use: window.testDatabase.testReadReports()')
 }
+
+
