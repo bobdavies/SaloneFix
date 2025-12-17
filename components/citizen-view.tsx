@@ -621,10 +621,6 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
       <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border/50 transition-all duration-300">
         <div className="container flex h-16 items-center justify-between px-4 max-w-5xl mx-auto">
           <div className="flex items-center gap-3 group">
-            <div className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-amber-600 shadow-lg shadow-primary/25 transition-transform duration-300 group-hover:scale-105">
-              <Shield className="h-5 w-5 text-primary-foreground" />
-              <div className="absolute inset-0 rounded-xl bg-primary/20 blur-md -z-10" />
-            </div>
             <div className="flex flex-col">
               <span className="text-lg font-bold tracking-tight text-foreground">SaloneFix</span>
               <span className="text-[10px] text-muted-foreground font-medium tracking-wider uppercase">

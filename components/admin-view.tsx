@@ -7,7 +7,6 @@ import {
   Map,
   FileText,
   Settings,
-  Shield,
   Bell,
   Users,
   TrendingUp,
@@ -2423,9 +2422,6 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh, 
       {/* Desktop Sidebar */}
       <aside className="hidden w-64 flex-col border-r border-sidebar-border bg-sidebar lg:flex">
         <div className="flex h-16 items-center gap-3 border-b border-sidebar-border px-6">
-          <div className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-sidebar-primary to-amber-600 shadow-lg shadow-sidebar-primary/25">
-            <Shield className="h-5 w-5 text-sidebar-primary-foreground" />
-          </div>
           <div className="flex flex-col">
             <span className="text-lg font-bold text-sidebar-foreground">SaloneFix</span>
             <span className="text-[10px] text-muted-foreground font-medium tracking-wider uppercase">Admin Panel</span>
@@ -2485,9 +2481,6 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh, 
       >
         <div className="flex h-16 items-center justify-between border-b border-sidebar-border px-6">
           <div className="flex items-center gap-3">
-            <div className="relative flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-sidebar-primary to-amber-600 shadow-lg shadow-sidebar-primary/25">
-              <Shield className="h-5 w-5 text-sidebar-primary-foreground" />
-            </div>
             <div className="flex flex-col">
               <span className="text-lg font-bold text-sidebar-foreground">SaloneFix</span>
               <span className="text-[10px] text-muted-foreground font-medium tracking-wider uppercase">Admin Panel</span>
@@ -2562,9 +2555,6 @@ export function AdminView({ reports, onStatusChange, onTeamAssigned, onRefresh, 
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-amber-600">
-              <Shield className="h-5 w-5 text-primary-foreground" />
-            </div>
             <span className="text-lg font-bold">SaloneFix</span>
           </div>
 
