@@ -17,7 +17,17 @@ const MODEL_NAME = process.env.NEXT_PUBLIC_GEMINI_MODEL || 'gemini-pro'
 // Initialize Gemini AI
 const getGeminiClient = () => {
   if (!GEMINI_API_KEY) {
-    throw new Error('Missing NEXT_PUBLIC_GEMINI_API_KEY. Please check your .env.local file.')
+    const errorMsg = 'Missing NEXT_PUBLIC_GEMINI_API_KEY environment variable. ' +
+      'Please ensure it is set in your Vercel environment variables (Settings > Environment Variables). ' +
+      'The variable name must be exactly: NEXT_PUBLIC_GEMINI_API_KEY'
+    console.error('[getGeminiClient]', errorMsg)
+    console.error('[getGeminiClient] Available env vars:', {
+      hasKey: !!GEMINI_API_KEY,
+      keyLength: GEMINI_API_KEY?.length || 0,
+      keyPrefix: GEMINI_API_KEY?.substring(0, 10) || 'N/A',
+      allEnvKeys: Object.keys(process.env).filter(k => k.includes('GEMINI') || k.includes('API'))
+    })
+    throw new Error(errorMsg)
   }
   return new GoogleGenerativeAI(GEMINI_API_KEY)
 }
@@ -45,6 +55,21 @@ const analyzeImageWithAI = async (base64Image: string, mimeType: string): Promis
   severity: 'High' | 'Medium' | 'Low'
   description: string
 }> => {
+  console.log('[analyzeImageWithAI] Starting AI analysis...')
+  console.log('[analyzeImageWithAI] API Key check:', {
+    hasKey: !!GEMINI_API_KEY,
+    keyLength: GEMINI_API_KEY?.length || 0,
+    keyPrefix: GEMINI_API_KEY ? `${GEMINI_API_KEY.substring(0, 10)}...` : 'N/A',
+    modelName: MODEL_NAME
+  })
+
+  // Check API key first
+  if (!GEMINI_API_KEY) {
+    const errorMsg = 'Gemini API key is missing. Please set NEXT_PUBLIC_GEMINI_API_KEY in Vercel environment variables.'
+    console.error('[analyzeImageWithAI]', errorMsg)
+    throw new Error(errorMsg)
+  }
+
   // List of models to try in order (fallback mechanism)
   const modelsToTry = [
     MODEL_NAME, // Try the configured model first
@@ -71,9 +96,12 @@ const analyzeImageWithAI = async (base64Image: string, mimeType: string): Promis
     { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
   ]
 
+  const errors: string[] = []
+
   // Try each model until one works
   for (const modelName of modelsToTry) {
     try {
+      console.log(`[analyzeImageWithAI] Attempting to use model: ${modelName}`)
       const genAI = getGeminiClient()
       const model = genAI.getGenerativeModel({ model: modelName })
 
@@ -84,6 +112,7 @@ const analyzeImageWithAI = async (base64Image: string, mimeType: string): Promis
 
       const response = await result.response
       const text = response.text()
+      console.log(`[analyzeImageWithAI] Successfully got response from ${modelName}:`, text.substring(0, 100))
 
       // Parse JSON response - handle potential formatting issues
       let jsonText = text.trim()
@@ -96,6 +125,7 @@ const analyzeImageWithAI = async (base64Image: string, mimeType: string): Promis
       }
 
       const aiResponse = JSON.parse(jsonText)
+      console.log('[analyzeImageWithAI] Parsed AI response:', aiResponse)
 
       // Normalize severity
       const severity = aiResponse.severity || 'Medium'
@@ -103,31 +133,48 @@ const analyzeImageWithAI = async (base64Image: string, mimeType: string): Promis
         ? severity as 'High' | 'Medium' | 'Low'
         : 'Medium'
 
-      return {
+      const result_data = {
         category: aiResponse.category || 'Other',
         severity: normalizedSeverity,
         description: aiResponse.description || 'No description provided',
       }
+      
+      console.log('[analyzeImageWithAI] Returning successful analysis:', result_data)
+      return result_data
     } catch (error: any) {
+      const errorMessage = error?.message || String(error)
+      const errorDetails = {
+        model: modelName,
+        error: errorMessage,
+        code: error?.code,
+        status: error?.status,
+        statusText: error?.statusText
+      }
+      
+      console.error(`[analyzeImageWithAI] Error with model ${modelName}:`, errorDetails)
+      errors.push(`${modelName}: ${errorMessage}`)
+      
       // If it's a 404 (model not found), try the next model
-      if (error?.message?.includes('404') || error?.message?.includes('not found')) {
-        console.warn(`Model ${modelName} not available, trying next model...`)
+      if (errorMessage?.includes('404') || errorMessage?.includes('not found')) {
+        console.warn(`[analyzeImageWithAI] Model ${modelName} not available, trying next model...`)
         continue
       }
       
-      // For other errors, log and try next model
-      console.error(`Error with model ${modelName}:`, error)
+      // If it's an API key error, don't try other models
+      if (errorMessage?.includes('API key') || errorMessage?.includes('authentication') || errorMessage?.includes('401') || errorMessage?.includes('403')) {
+        console.error('[analyzeImageWithAI] API key authentication error, stopping attempts')
+        throw new Error(`Gemini API authentication failed: ${errorMessage}. Please verify your NEXT_PUBLIC_GEMINI_API_KEY in Vercel environment variables.`)
+      }
+      
+      // For other errors, try next model
       continue
     }
   }
 
-  // If all models failed, return default values
-  console.error('All Gemini models failed. Using default values.')
-  return {
-    category: 'Uncategorized',
-    severity: 'Medium' as const,
-    description: 'AI analysis unavailable - please update manually',
-  }
+  // If all models failed, throw error with details
+  const errorMsg = `All Gemini models failed. Errors: ${errors.join('; ')}`
+  console.error('[analyzeImageWithAI]', errorMsg)
+  throw new Error(`AI analysis failed: ${errorMsg}. Please check your API key and model configuration.`)
 }
 
 // --- UPDATE STATUS FUNCTION ---
@@ -381,35 +428,22 @@ export async function assignTeamToReport(
 
     // Check if we have data (update succeeded) or error
     if (updateError) {
-      // Log error details for debugging
+      // Check if error is an empty object (which can happen even when update succeeds)
       const errorKeys = updateError ? Object.keys(updateError) : []
       const errorString = JSON.stringify(updateError, null, 2)
-      
-      console.error('[assignTeamToReport] Update error object:', {
-        hasError: !!updateError,
-        errorType: typeof updateError,
-        errorKeys: errorKeys,
-        errorString: errorString,
-        errorValue: updateError,
-        // Try to access common Supabase error properties
-        message: (updateError as any)?.message,
-        details: (updateError as any)?.details,
-        hint: (updateError as any)?.hint,
-        code: (updateError as any)?.code,
-      })
-      
-      // Extract error message from Supabase error object
       const errorMsg = 
         (updateError as any)?.message || 
         (updateError as any)?.details || 
         (updateError as any)?.hint || 
         ((updateError as any)?.code ? `Error code: ${(updateError as any).code}` : '') ||
-        (typeof updateError === 'string' ? updateError : errorString) ||
-        'Unknown error'
+        (typeof updateError === 'string' ? updateError : '') ||
+        ''
       
-      // If error is empty object, verify if update actually succeeded
-      if (errorKeys.length === 0 || errorString === '{}' || errorMsg === 'Unknown error') {
-        console.warn('[assignTeamToReport] Empty error object detected. Verifying if update succeeded...')
+      // If error is empty object or has no meaningful message, verify if update actually succeeded
+      const isEmptyError = errorKeys.length === 0 || errorString === '{}' || !errorMsg
+      
+      if (isEmptyError) {
+        console.log('[assignTeamToReport] Empty error object detected. Verifying if update succeeded...')
         
         // Wait a bit for database to sync
         await new Promise(resolve => setTimeout(resolve, 100))
@@ -431,27 +465,35 @@ export async function assignTeamToReport(
           const verifyValue = verifyReport?.assigned_to || null
           const expectedValue = updateValue || null
           
-          if (verifyValue === expectedValue || 
-              (verifyValue === null && expectedValue === null) ||
-              (verifyValue?.trim() === expectedValue?.trim())) {
-            console.log('[assignTeamToReport] ✅ Update verified - succeeded despite error object', {
-              expected: expectedValue,
-              actual: verifyValue
+          // Normalize for comparison (trim strings, handle null)
+          const normalizedVerify = verifyValue?.toString().trim() || null
+          const normalizedExpected = expectedValue?.toString().trim() || null
+          
+          if (normalizedVerify === normalizedExpected) {
+            console.log('[assignTeamToReport] ✅ Update verified - succeeded despite empty error object', {
+              expected: normalizedExpected,
+              actual: normalizedVerify
             })
-            // Continue normally - update succeeded
+            // Continue normally - update succeeded, no need to throw error
           } else {
             console.error('[assignTeamToReport] Verification failed:', {
-              expected: expectedValue,
-              actual: verifyValue
+              expected: normalizedExpected,
+              actual: normalizedVerify
             })
-            throw new Error(`Failed to assign team: Update verification failed. Expected "${expectedValue}", got "${verifyValue}"`)
+            throw new Error(`Failed to assign team: Update verification failed. Expected "${normalizedExpected}", got "${normalizedVerify}"`)
           }
         } catch (verifyError) {
           console.error('[assignTeamToReport] Verification exception:', verifyError)
           throw new Error(`Failed to assign team: ${verifyError instanceof Error ? verifyError.message : 'Verification failed'}`)
         }
       } else {
-        // We have a real error message
+        // We have a real error message - log it properly
+        console.error('[assignTeamToReport] Update error:', {
+          message: errorMsg,
+          code: (updateError as any)?.code,
+          details: (updateError as any)?.details,
+        })
+        
         // Check for column missing error
         if (errorMsg.includes('assigned_to') || errorMsg.includes('column') || errorMsg.includes('does not exist') || errorMsg.includes('relation')) {
           console.warn('[assignTeamToReport] assigned_to column does not exist')
@@ -463,10 +505,26 @@ export async function assignTeamToReport(
           throw new Error(`Permission denied. Please check RLS policies. Error: ${errorMsg}`)
         }
         
-        // For "Cannot coerce" errors, continue anyway (update may have succeeded)
+        // For "Cannot coerce" errors, verify before throwing
         if (errorMsg.includes('Cannot coerce') || errorMsg.includes('coerce')) {
-          console.warn('[assignTeamToReport] Coerce error detected, but update may have succeeded')
-          // Continue to create activity log
+          console.warn('[assignTeamToReport] Coerce error detected, verifying if update succeeded...')
+          
+          // Verify by fetching
+          const { data: verifyReport } = await supabase
+            .from('reports')
+            .select('assigned_to')
+            .eq('id', reportId)
+            .maybeSingle()
+          
+          const verifyValue = verifyReport?.assigned_to || null
+          const expectedValue = updateValue || null
+          
+          if ((verifyValue?.toString().trim() || null) === (expectedValue?.toString().trim() || null)) {
+            console.log('[assignTeamToReport] ✅ Update verified - succeeded despite coerce error')
+            // Continue normally - update succeeded
+          } else {
+            throw new Error(`Failed to assign team: ${errorMsg}`)
+          }
         } else {
           throw new Error(`Failed to assign team: ${errorMsg}`)
         }
@@ -479,7 +537,7 @@ export async function assignTeamToReport(
         actual: updatedValue
       })
     } else {
-      // No error and no data - might still have succeeded
+      // No error and no data - verify to be sure
       console.log('[assignTeamToReport] Update completed (no error, no data returned). Verifying...')
       
       // Verify by fetching
@@ -490,7 +548,17 @@ export async function assignTeamToReport(
         .maybeSingle()
       
       if (verifyReport) {
-        console.log('[assignTeamToReport] ✅ Update verified:', verifyReport.assigned_to)
+        const verifyValue = verifyReport.assigned_to || null
+        const expectedValue = updateValue || null
+        
+        if ((verifyValue?.toString().trim() || null) === (expectedValue?.toString().trim() || null)) {
+          console.log('[assignTeamToReport] ✅ Update verified:', verifyValue)
+        } else {
+          console.warn('[assignTeamToReport] Update may have failed - values do not match:', {
+            expected: expectedValue,
+            actual: verifyValue
+          })
+        }
       }
     }
     
@@ -679,9 +747,20 @@ export async function submitReport(
     const imageUrl = await uploadFileToStorage(file)
 
     // Step 2: Convert & Analyze
+    console.log('[submitReport] Starting image analysis...')
     const base64Image = await fileToBase64(file)
     const mimeType = file.type || 'image/jpeg'
-    const aiAnalysis = await analyzeImageWithAI(base64Image, mimeType)
+    console.log('[submitReport] Image converted to base64, length:', base64Image.length)
+    
+    let aiAnalysis
+    try {
+      aiAnalysis = await analyzeImageWithAI(base64Image, mimeType)
+      console.log('[submitReport] AI analysis successful:', aiAnalysis)
+    } catch (error: any) {
+      console.error('[submitReport] AI analysis failed:', error)
+      // Re-throw with more context
+      throw new Error(`Failed to analyze image: ${error.message || 'Unknown error'}. Please check your Gemini API key configuration.`)
+    }
 
     // Step 3: Insert into DB
     // Use device_id for anonymous tracking (stored in localStorage)

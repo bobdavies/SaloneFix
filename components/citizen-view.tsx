@@ -24,6 +24,8 @@ import {
   Building,
   Ambulance,
   RefreshCw,
+  Trash2,
+  CheckCircle,
 } from "lucide-react"
 import { ReportCard } from "@/components/report-card"
 import { Button } from "@/components/ui/button"
@@ -41,13 +43,23 @@ import { trackReportSubmission, trackSearch, trackFilter } from "@/lib/analytics
 import { cn } from "@/lib/utils"
 import type { Report, ReportCategory, ReportStatus } from "@/lib/types"
 import { emergencyContacts } from "@/lib/types"
-import { submitReport, fetchReportsByDeviceOrUser, convertReportFromDB } from "@/src/services/reportService"
+import { submitReport, fetchReportsByDeviceOrUser, convertReportFromDB, deleteReport } from "@/src/services/reportService"
 import { getCurrentUser } from "@/src/services/authService"
 import { supabase } from "@/src/lib/supabase"
 import { getDeviceId } from "@/src/lib/deviceId"
 import { useMyReportsSubscription } from "@/hooks/use-my-reports-subscription"
 import { useNotifications } from "@/hooks/use-notifications"
 import { NotificationDropdown } from "@/components/notification-dropdown"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 
 interface CitizenViewProps {
   reports: Report[]
@@ -81,10 +93,16 @@ function AnimatedCounter({ value, duration = 1000 }: { value: number; duration?:
 function ReportDetailModal({
   report,
   onClose,
+  onDelete,
 }: {
   report: Report | null
   onClose: () => void
+  onDelete?: (reportId: string) => Promise<void>
 }) {
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const { toast } = useToast()
+
   if (!report) return null
 
   const statusSteps = [
@@ -94,19 +112,47 @@ function ReportDetailModal({
   ]
 
   const currentStepIndex = statusSteps.findIndex((s) => s.status === report.status)
+  const isResolved = report.status === "resolved"
+
+  const handleDelete = async () => {
+    if (!onDelete) return
+    
+    setIsDeleting(true)
+    try {
+      await onDelete(report.id)
+      setShowDeleteConfirm(false)
+      onClose()
+      toast({
+        title: "Report Deleted",
+        description: "The report has been successfully deleted.",
+        duration: 3000,
+      })
+    } catch (error) {
+      console.error("Error deleting report:", error)
+      toast({
+        title: "Error Deleting Report",
+        description: error instanceof Error ? error.message : "Failed to delete report. Please try again.",
+        variant: "destructive",
+        duration: 5000,
+      })
+    } finally {
+      setIsDeleting(false)
+    }
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="relative w-full max-w-lg bg-card rounded-2xl shadow-2xl overflow-hidden animate-scale-in max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-card z-10 flex items-center justify-between p-4 border-b border-border">
-          <h2 className="text-lg font-semibold text-card-foreground">Report Details</h2>
-          <Button variant="ghost" size="icon" onClick={onClose} className="rounded-full">
-            <X className="h-5 w-5" />
-          </Button>
-        </div>
+    <>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+        <div className="relative w-full max-w-lg bg-card rounded-2xl shadow-2xl overflow-hidden animate-scale-in max-h-[90vh] overflow-y-auto">
+          <div className="sticky top-0 bg-card z-10 flex items-center justify-between p-4 border-b border-border">
+            <h2 className="text-lg font-semibold text-card-foreground">Report Details</h2>
+            <Button variant="ghost" size="icon" onClick={onClose} className="rounded-full">
+              <X className="h-5 w-5" />
+            </Button>
+          </div>
 
-        <div className="p-4 space-y-6">
-          {report.imageUrl && (
+          <div className="p-4 space-y-6">
+            {report.imageUrl && (
             <div className="relative aspect-video rounded-xl overflow-hidden bg-muted">
               <Image
                 src={report.imageUrl || "/placeholder.svg"}
@@ -135,12 +181,12 @@ function ReportDetailModal({
               <MapPin className="h-4 w-4" />
               {report.location}
             </div>
-          </div>
+            </div>
 
-          <p className="text-muted-foreground">{report.description}</p>
+            <p className="text-muted-foreground">{report.description}</p>
 
-          {/* Status Timeline */}
-          <div className="space-y-3">
+            {/* Status Timeline */}
+            <div className="space-y-3">
             <h4 className="text-sm font-medium text-card-foreground">Status Timeline</h4>
             <div className="relative flex items-center justify-between">
               <div className="absolute top-1/2 left-0 right-0 h-1 bg-muted -translate-y-1/2 rounded-full" />
@@ -201,11 +247,11 @@ function ReportDetailModal({
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+              </div>
+            )}
 
-          {report.assignedTo && (
-            <div className="flex items-center gap-3 p-3 rounded-lg bg-info/10 border border-info/20">
+            {report.assignedTo && (
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-info/10 border border-info/20">
               <Users className="h-5 w-5 text-info" />
               <div>
                 <p className="text-sm font-medium text-card-foreground">Assigned to</p>
@@ -213,9 +259,63 @@ function ReportDetailModal({
               </div>
             </div>
           )}
+
+          {/* Delete Button for Resolved Reports */}
+          {isResolved && onDelete && (
+            <div className="pt-4 border-t border-border">
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-success/10 border border-success/20 mb-3">
+                <CheckCircle className="h-5 w-5 text-success flex-shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-card-foreground">Report Resolved</p>
+                  <p className="text-xs text-muted-foreground">This report has been resolved. You can now delete it if you no longer need it.</p>
+                </div>
+              </div>
+              <Button
+                variant="destructive"
+                onClick={() => setShowDeleteConfirm(true)}
+                className="w-full"
+                disabled={isDeleting}
+              >
+                {isDeleting ? (
+                  <>
+                    <Spinner className="h-4 w-4 mr-2" />
+                    Deleting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete Report
+                  </>
+                )}
+              </Button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </div>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Report?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this resolved report? This action cannot be undone. The report will be permanently removed from your list.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isDeleting ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   )
 }
 
@@ -232,6 +332,8 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [deviceId, setDeviceId] = useState<string | null>(null)
   const [isMounted, setIsMounted] = useState(false)
+  const [reportToDelete, setReportToDelete] = useState<string | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
   const { toast } = useToast()
   
   // Use real-time subscription for "My Reports"
@@ -257,15 +359,27 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
       if (newNotifications.length > 0) {
         const latestNotification = newNotifications[0]
         const message = getNotificationMessage(latestNotification)
+        const isResolved = latestNotification.status === 'resolved' || latestNotification.type === 'resolved'
+        
         toast({
-          title: latestNotification.status === 'resolved' ? 'Report Resolved! 🎉' : 'Status Updated',
-          description: message,
-          duration: 5000,
+          title: isResolved ? 'Report Resolved! 🎉' : 'Status Updated',
+          description: isResolved 
+            ? `${message} You can now delete this report if you no longer need it.`
+            : message,
+          duration: isResolved ? 8000 : 5000, // Longer duration for resolved notifications
+          className: isResolved ? 'bg-success/10 border-success/20' : undefined,
         })
+        
+        // If resolved, also switch to "My Reports" tab to show the resolved report
+        if (isResolved && activeTab !== "my-reports") {
+          setTimeout(() => {
+            setActiveTab("my-reports")
+          }, 1000)
+        }
       }
     }
     previousNotificationCountRef.current = notifications.length
-  }, [notifications.length, getNotificationMessage, toast])
+  }, [notifications.length, getNotificationMessage, toast, activeTab])
   
   // Track when component has mounted (client-side only)
   useEffect(() => {
@@ -454,10 +568,21 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
       }
     } catch (error) {
       console.error('Error submitting report:', error)
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred'
+      
+      // Provide more helpful error messages
+      let userFriendlyMessage = errorMessage
+      if (errorMessage.includes('NEXT_PUBLIC_GEMINI_API_KEY') || errorMessage.includes('API key')) {
+        userFriendlyMessage = 'AI analysis is not configured. Please contact support or try again later.'
+      } else if (errorMessage.includes('Failed to analyze image')) {
+        userFriendlyMessage = 'Unable to analyze the image. Please check your internet connection and try again.'
+      }
+      
       toast({
         title: 'Error Submitting Report',
-        description: error instanceof Error ? error.message : 'An unknown error occurred',
+        description: userFriendlyMessage,
         variant: 'destructive',
+        duration: 5000,
       })
     } finally {
       setIsAnalyzing(false)
@@ -1004,11 +1129,34 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
                       </CardContent>
                     </Card>
                   ) : (
-                    filteredMyReports.map((report, index) => (
-                      <div key={report.id} onClick={() => setSelectedReport(report)}>
-                        <ReportCard report={report} index={index} />
-                      </div>
-                    ))
+                    filteredMyReports.map((report, index) => {
+                      const isResolved = report.status === "resolved"
+                      
+                      return (
+                        <div key={report.id} className="relative group">
+                          <div onClick={() => setSelectedReport(report)}>
+                            <ReportCard report={report} index={index} />
+                          </div>
+                          {/* Delete button for resolved reports */}
+                          {isResolved && (
+                            <div className="absolute top-2 right-2 z-10">
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setReportToDelete(report.id)
+                                }}
+                                className="h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                                disabled={isDeleting}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })
                   )}
                 </>
               )}
@@ -1151,7 +1299,67 @@ export function CitizenView({ reports, onReportClick, onReportAdded, isLoading =
       )}
 
       {/* Report Detail Modal */}
-      {selectedReport && <ReportDetailModal report={selectedReport} onClose={() => setSelectedReport(null)} />}
+      {selectedReport && (
+        <ReportDetailModal
+          report={selectedReport}
+          onClose={() => setSelectedReport(null)}
+          onDelete={async (reportId: string) => {
+            try {
+              await deleteReport(reportId)
+              // Remove from local state
+              setMyReports((prev) => prev.filter((r) => r.id !== reportId))
+            } catch (error) {
+              throw error // Re-throw to let the modal handle the error display
+            }
+          }}
+        />
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={!!reportToDelete} onOpenChange={(open) => !open && setReportToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Report?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this resolved report? This action cannot be undone. The report will be permanently removed from your list.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting} onClick={() => setReportToDelete(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                if (!reportToDelete) return
+                
+                setIsDeleting(true)
+                try {
+                  await deleteReport(reportToDelete)
+                  setMyReports((prev) => prev.filter((r) => r.id !== reportToDelete))
+                  setReportToDelete(null)
+                  toast({
+                    title: "Report Deleted",
+                    description: "The report has been successfully deleted.",
+                    duration: 3000,
+                  })
+                } catch (error) {
+                  console.error("Error deleting report:", error)
+                  toast({
+                    title: "Error Deleting Report",
+                    description: error instanceof Error ? error.message : "Failed to delete report. Please try again.",
+                    variant: "destructive",
+                    duration: 5000,
+                  })
+                } finally {
+                  setIsDeleting(false)
+                }
+              }}
+              disabled={isDeleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isDeleting ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
