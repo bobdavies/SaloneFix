@@ -1,9 +1,10 @@
 import { supabase } from '../lib/supabase'
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai'
-import type { Report, ReportCategory, ActivityLogEntry } from '../../lib/types'
+import type { Report, ReportCategory, ActivityLogEntry, ReportPriority } from '../../lib/types'
 import { addReportIdToDevice, getReportIdsForDevice } from '../lib/deviceId'
 import { createActivityLog, fetchActivityLogForReport } from './activityLogService'
 import { createNotification } from './notificationService'
+import { autoAssignReport, isAutoAssignmentEnabled } from './autoAssignmentService'
 
 // --- CONFIGURATION ---
 
@@ -228,6 +229,52 @@ export async function updateReportStatus(
     return true
   } catch (error) {
     console.error('[updateReportStatus] Fatal error:', error)
+    throw error
+  }
+}
+
+// --- UPDATE PRIORITY FUNCTION ---
+export async function updateReportPriority(
+  reportId: string,
+  newPriority: 'critical' | 'high' | 'medium' | 'low',
+  performedBy: string = 'Admin'
+) {
+  try {
+    console.log(`[updateReportPriority] Updating priority for report ${reportId.substring(0, 8)}...`)
+    
+    const { error: updateError } = await supabase
+      .from('reports')
+      .update({ priority: newPriority })
+      .eq('id', reportId)
+
+    if (updateError) {
+      // If priority column doesn't exist, that's okay - just log and return false
+      const errorMsg = updateError.message || JSON.stringify(updateError) || ''
+      if (errorMsg.includes('priority') || errorMsg.includes('column') || errorMsg.includes('does not exist')) {
+        console.warn('[updateReportPriority] Priority column does not exist yet')
+        return false
+      }
+      console.error('[updateReportPriority] Update error:', updateError)
+      throw new Error(`Failed to update priority: ${updateError.message}`)
+    }
+
+    console.log('[updateReportPriority] ✅ Priority updated successfully')
+    
+    // Create activity log (non-blocking)
+    createActivityLog({
+      reportId,
+      action: 'priority-updated',
+      performedBy,
+      performedByType: 'admin',
+      details: `Priority changed to ${newPriority}`,
+      metadata: { priority: newPriority },
+    }).catch(err => {
+      console.warn('[updateReportPriority] Activity log failed (non-critical):', err)
+    })
+    
+    return true
+  } catch (error) {
+    console.error('[updateReportPriority] Fatal error:', error)
     throw error
   }
 }
@@ -702,6 +749,29 @@ export async function submitReport(
     if (error) throw new Error(`Failed to submit report: ${error.message}`)
     if (!data) throw new Error('No data returned')
 
+    // Auto-assign team if enabled (non-blocking)
+    if (isAutoAssignmentEnabled() && data.id) {
+      // Convert to Report type for auto-assignment
+      const reportForAssignment: Report = {
+        id: data.id,
+        title: data.category || 'Report',
+        location: `${data.latitude}, ${data.longitude}`,
+        category: (data.category?.toLowerCase() as ReportCategory) || 'other',
+        status: 'pending',
+        severity: (data.severity?.toLowerCase() as 'low' | 'medium' | 'high') || 'medium',
+        priority: 'medium' as ReportPriority,
+        description: data.description || '',
+        timestamp: new Date(data.created_at),
+        imageUrl: data.image_url || undefined,
+      }
+
+      // Attempt auto-assignment (fire and forget - don't block submission)
+      autoAssignReport(reportForAssignment).catch((err) => {
+        console.warn('Auto-assignment failed (non-critical):', err)
+        // Don't throw - auto-assignment failure shouldn't block report submission
+      })
+    }
+
     // Force refresh cache logic if you have it, or return data
     return data
 
@@ -726,6 +796,54 @@ export type ReportFromDB = {
   device_id?: string | null  // For anonymous user tracking
   assigned_to?: string | null
   resolved_at?: string | null
+  priority?: string | null  // 'critical' | 'high' | 'medium' | 'low'
+}
+
+// Calculate priority based on severity and age
+// Priority increases with severity and time since report creation
+export function calculatePriority(
+  severity: 'low' | 'medium' | 'high',
+  createdAt: Date,
+  status: 'pending' | 'in-progress' | 'resolved' = 'pending'
+): 'critical' | 'high' | 'medium' | 'low' {
+  // Resolved reports always have low priority
+  if (status === 'resolved') {
+    return 'low'
+  }
+
+  const now = new Date()
+  const ageInHours = (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60)
+  
+  // Base priority from severity
+  let basePriority: 'critical' | 'high' | 'medium' | 'low' = 'medium'
+  if (severity === 'high') {
+    basePriority = 'high'
+  } else if (severity === 'low') {
+    basePriority = 'low'
+  }
+
+  // Escalate based on age
+  // High severity + > 24 hours = critical
+  if (severity === 'high' && ageInHours > 24) {
+    return 'critical'
+  }
+  
+  // Medium severity + > 48 hours = high
+  if (severity === 'medium' && ageInHours > 48) {
+    return 'high'
+  }
+  
+  // High severity + > 12 hours = critical
+  if (severity === 'high' && ageInHours > 12) {
+    return 'critical'
+  }
+  
+  // Low severity + > 72 hours = medium
+  if (severity === 'low' && ageInHours > 72) {
+    return 'medium'
+  }
+
+  return basePriority
 }
 
 // --- HELPER FOR ADMIN DASHBOARD ---
@@ -950,6 +1068,15 @@ export async function convertReportFromDBWithActivityLog(dbReport: ReportFromDB)
     console.warn('Failed to fetch activity log:', error)
   }
 
+  // Calculate or use stored priority
+  let priority: ReportPriority = 'medium'
+  if (dbReport.priority && ['critical', 'high', 'medium', 'low'].includes(dbReport.priority)) {
+    priority = dbReport.priority as ReportPriority
+  } else {
+    // Auto-calculate if not set
+    priority = calculatePriority(normalizedSeverity, timestamp, normalizedStatus)
+  }
+
   return {
     id: dbReport.id,
     title,
@@ -957,6 +1084,7 @@ export async function convertReportFromDBWithActivityLog(dbReport: ReportFromDB)
     category: normalizedCategory,
     status: normalizedStatus,
     severity: normalizedSeverity,
+    priority,
     description: dbReport.description || '',
     timestamp,
     // Use reporter_id for authenticated users, device_id for anonymous users
@@ -970,6 +1098,24 @@ export async function convertReportFromDBWithActivityLog(dbReport: ReportFromDB)
 
 // Convert database report to app Report type (synchronous, without activity log)
 export function convertReportFromDB(dbReport: ReportFromDB): Report {
+  const normalizedSeverity = (['Low', 'Medium', 'High'].includes(dbReport.severity) 
+    ? dbReport.severity.toLowerCase() as "low" | "medium" | "high"
+    : 'medium')
+  
+  const normalizedStatus = (dbReport.status === 'In Progress' ? 'in-progress' : 
+             dbReport.status === 'Resolved' ? 'resolved' : 'pending') as "pending" | "in-progress" | "resolved"
+  
+  const timestamp = new Date(dbReport.created_at)
+  
+  // Calculate or use stored priority
+  let priority: ReportPriority = 'medium'
+  if (dbReport.priority && ['critical', 'high', 'medium', 'low'].includes(dbReport.priority)) {
+    priority = dbReport.priority as ReportPriority
+  } else {
+    // Auto-calculate if not set
+    priority = calculatePriority(normalizedSeverity, timestamp, normalizedStatus)
+  }
+
   return {
     id: dbReport.id,
     title: dbReport.category || dbReport.description?.substring(0, 50) || 'Untitled Report',
@@ -979,13 +1125,11 @@ export function convertReportFromDB(dbReport: ReportFromDB): Report {
     category: (['sanitation', 'roads', 'water', 'electrical', 'other'].includes(dbReport.category?.toLowerCase() || '') 
       ? dbReport.category?.toLowerCase() as ReportCategory 
       : 'other'),
-    status: (dbReport.status === 'In Progress' ? 'in-progress' : 
-             dbReport.status === 'Resolved' ? 'resolved' : 'pending') as "pending" | "in-progress" | "resolved",
-    severity: (['Low', 'Medium', 'High'].includes(dbReport.severity) 
-      ? dbReport.severity.toLowerCase() as "low" | "medium" | "high"
-      : 'medium'),
+    status: normalizedStatus,
+    severity: normalizedSeverity,
+    priority,
     description: dbReport.description || '',
-    timestamp: new Date(dbReport.created_at),
+    timestamp,
     reportedBy: dbReport.reporter_id || dbReport.device_id || undefined,
     assignedTo: dbReport.assigned_to || undefined,
     resolvedAt: dbReport.resolved_at ? new Date(dbReport.resolved_at) : undefined,

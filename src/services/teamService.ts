@@ -52,6 +52,9 @@ export function convertTeamFromDB(dbTeam: TeamFromDB): Team {
     department: dbTeam.department,
     members: dbTeam.members_count,
     activeJobs: dbTeam.active_jobs_count,
+    contactEmail: dbTeam.contact_email || undefined,
+    contactPhone: dbTeam.contact_phone || undefined,
+    description: dbTeam.description || undefined,
   }
 }
 

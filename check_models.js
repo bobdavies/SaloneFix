@@ -1,8 +1,20 @@
 // Run this with: node check_models.js
+// IMPORTANT: Set your API key as an environment variable:
+// Windows: set NEXT_PUBLIC_GEMINI_API_KEY=your_key_here && node check_models.js
+// Linux/Mac: NEXT_PUBLIC_GEMINI_API_KEY=your_key_here node check_models.js
+
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// PASTE YOUR KEY DIRECTLY HERE FOR THIS TEST
-const genAI = new GoogleGenerativeAI("AIzaSyA0TX4vCYnrHG5v26498An0dYFnjn27iN4");
+// Load from environment variable (or .env.local if using dotenv)
+const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+
+if (!apiKey) {
+  console.error("❌ Error: API key not found!");
+  console.error("Please set NEXT_PUBLIC_GEMINI_API_KEY environment variable or use dotenv to load from .env.local");
+  process.exit(1);
+}
+
+const genAI = new GoogleGenerativeAI(apiKey);
 
 async function listModels() {
   try {

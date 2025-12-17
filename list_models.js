@@ -1,6 +1,17 @@
 // Run with: node list_models.js
-// Make sure to replace YOUR_KEY below
-const apiKey = "AIzaSyA0TX4vCYnrHG5v26498An0dYFnjn27iN4"; 
+// IMPORTANT: Set your API key as an environment variable:
+// Windows: set NEXT_PUBLIC_GEMINI_API_KEY=your_key_here && node list_models.js
+// Linux/Mac: NEXT_PUBLIC_GEMINI_API_KEY=your_key_here node list_models.js
+
+// Load from environment variable (or .env.local if using dotenv)
+const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+
+if (!apiKey) {
+  console.error("❌ Error: API key not found!");
+  console.error("Please set NEXT_PUBLIC_GEMINI_API_KEY environment variable or use dotenv to load from .env.local");
+  process.exit(1);
+}
+
 const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
 
 async function checkModels() {

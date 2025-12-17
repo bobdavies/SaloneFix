@@ -79,6 +79,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to auto-update updated_at
+DROP TRIGGER IF EXISTS update_teams_updated_at ON teams;
 CREATE TRIGGER update_teams_updated_at
   BEFORE UPDATE ON teams
   FOR EACH ROW
@@ -133,6 +134,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to update team active jobs count
+DROP TRIGGER IF EXISTS update_team_active_jobs_trigger ON reports;
 CREATE TRIGGER update_team_active_jobs_trigger
   AFTER UPDATE ON reports
   FOR EACH ROW
@@ -179,6 +181,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to create notification on status change
+DROP TRIGGER IF EXISTS create_notification_on_status_change_trigger ON reports;
 CREATE TRIGGER create_notification_on_status_change_trigger
   AFTER UPDATE ON reports
   FOR EACH ROW
@@ -220,6 +223,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to create notification on team assignment
+DROP TRIGGER IF EXISTS create_notification_on_team_assignment_trigger ON reports;
 CREATE TRIGGER create_notification_on_team_assignment_trigger
   AFTER UPDATE ON reports
   FOR EACH ROW

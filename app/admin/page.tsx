@@ -4,38 +4,18 @@ import { AdminView } from "@/components/admin-view"
 import { AdminAuthGuard } from "@/components/admin-auth-guard"
 import { ErrorBoundary } from "@/components/error-boundary"
 import { type ReportStatus } from "@/lib/types"
-import { updateReportStatus as updateReportStatusInDB, assignTeamToReport, deleteReport } from "@/src/services/reportService"
+import { updateReportStatus as updateReportStatusInDB, assignTeamToReport, deleteReport, fetchAllReports, convertReportFromDB } from "@/src/services/reportService"
 import { trackStatusUpdate } from "@/lib/analytics"
 import { useToast } from "@/hooks/use-toast"
 import { useReportsSubscription } from "@/hooks/use-reports-subscription"
+import { useState, useCallback } from "react"
 // Import test functions for debugging
 import "@/src/services/testDatabase"
 
 function AdminPageContent() {
   const { reports, setReports, isLoading } = useReportsSubscription()
   const { toast } = useToast()
-  
-  // Expose refresh function for manual refresh button
-  const refreshReports = async () => {
-    try {
-      const { fetchAllReports, convertReportFromDB } = await import('@/src/services/reportService')
-      const dbReports = await fetchAllReports()
-      const convertedReports = dbReports.map(convertReportFromDB)
-      setReports(convertedReports)
-      toast({
-        title: "Refreshed",
-        description: `Loaded ${convertedReports.length} reports from database`,
-        duration: 2000,
-      })
-    } catch (error) {
-      console.error('Refresh failed:', error)
-      toast({
-        title: "Refresh Failed",
-        description: error instanceof Error ? error.message : "Failed to refresh reports",
-        variant: "destructive",
-      })
-    }
-  }
+  const [isRefreshing, setIsRefreshing] = useState(false)
 
   const handleStatusChange = async (reportId: string, newStatus: ReportStatus) => {
     // Map ReportStatus to database status format
@@ -117,6 +97,30 @@ function AdminPageContent() {
       }
     }
   }
+
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true)
+    try {
+      const dbReports = await fetchAllReports()
+      const convertedReports = dbReports.map(convertReportFromDB)
+      setReports(convertedReports)
+      toast({
+        title: "Refreshed",
+        description: `Loaded ${convertedReports.length} reports`,
+        duration: 2000,
+      })
+    } catch (error) {
+      console.error('Failed to refresh reports:', error)
+      toast({
+        title: "Error",
+        description: "Failed to refresh reports. Please try again.",
+        variant: "destructive",
+        duration: 3000,
+      })
+    } finally {
+      setIsRefreshing(false)
+    }
+  }, [setReports, toast])
 
   const handleTeamAssigned = async (reportId: string, teamName: string) => {
     const originalReport = reports.find(r => r.id === reportId)
@@ -216,7 +220,8 @@ function AdminPageContent() {
         reports={reports} 
         onStatusChange={handleStatusChange}
         onTeamAssigned={handleTeamAssigned}
-        onRefresh={refreshReports}
+        onRefresh={handleRefresh}
+        isRefreshing={isRefreshing}
       />
     </div>
   )

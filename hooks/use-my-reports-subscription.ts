@@ -88,118 +88,144 @@ export function useMyReportsSubscription(deviceId: string | null, userId: string
     attemptLoad()
 
     // Set up real-time subscription for this user's reports
-    const channel = supabase
-      .channel(`my-reports-${deviceId || userId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*', // Listen to all events (INSERT, UPDATE, DELETE)
-          schema: 'public',
-          table: 'reports',
-        },
-        async (payload) => {
-          console.log('Real-time update for my reports:', payload)
+    // Note: This is optional - if Realtime is not enabled, the app will still work
+    let channel: ReturnType<typeof supabase.channel> | null = null
+    
+    try {
+      channel = supabase
+        .channel(`my-reports-${deviceId || userId || 'anonymous'}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*', // Listen to all events (INSERT, UPDATE, DELETE)
+            schema: 'public',
+            table: 'reports',
+          },
+          async (payload) => {
+            if (!mounted) return
+            
+            console.log('Real-time update for my reports:', payload)
 
-          // Check if this report belongs to the current user/device
-          const report = payload.new as ReportFromDB | null
-          const oldReport = payload.old as ReportFromDB | null
-          
-          // Helper to check if report belongs to this user/device
-          const belongsToUser = (r: ReportFromDB | null) => {
-            if (!r) return false
+            // Check if this report belongs to the current user/device
+            const report = payload.new as ReportFromDB | null
+            const oldReport = payload.old as ReportFromDB | null
             
-            // Check authenticated user first
-            if (userId && r.reporter_id === userId) return true
-            
-            // Check device_id (if column exists)
-            if (deviceId && r.device_id === deviceId) return true
-            
-            // Always check localStorage fallback (works even if device_id column doesn't exist or deviceId is null)
-            if (typeof window !== 'undefined') {
-              try {
-                const storedIds = JSON.parse(localStorage.getItem('salonefix_my_report_ids') || '[]')
-                if (storedIds.includes(r.id)) return true
-              } catch {
-                // Ignore localStorage errors
+            // Helper to check if report belongs to this user/device
+            const belongsToUser = (r: ReportFromDB | null) => {
+              if (!r) return false
+              
+              // Check authenticated user first
+              if (userId && r.reporter_id === userId) return true
+              
+              // Check device_id (if column exists)
+              if (deviceId && r.device_id === deviceId) return true
+              
+              // Always check localStorage fallback (works even if device_id column doesn't exist or deviceId is null)
+              if (typeof window !== 'undefined') {
+                try {
+                  const storedIds = JSON.parse(localStorage.getItem('salonefix_my_report_ids') || '[]')
+                  if (storedIds.includes(r.id)) return true
+                } catch {
+                  // Ignore localStorage errors
+                }
               }
+              
+              return false
             }
-            
-            return false
-          }
 
-          if (payload.eventType === 'INSERT') {
-            // New report added - check if it belongs to this user
-            if (report && belongsToUser(report)) {
-              const converted = convertReportFromDB(report)
-              if (mounted) {
-                setMyReports((prev) => {
-                  // Check if already exists (avoid duplicates)
-                  if (prev.some(r => r.id === converted.id)) {
-                    return prev
-                  }
-                  return [converted, ...prev]
-                })
-              }
-            }
-          } else if (payload.eventType === 'UPDATE') {
-            // Report updated - check if it belongs to this user
-            if (report && belongsToUser(report)) {
-              const converted = convertReportFromDB(report)
-              if (mounted) {
-                setMyReports((prev) => {
-                  const existingIndex = prev.findIndex((r) => r.id === converted.id)
-                  if (existingIndex >= 0) {
-                    // Update existing report - this will trigger notifications
-                    const updated = [...prev]
-                    const oldReport = updated[existingIndex]
-                    updated[existingIndex] = converted
-                    console.log('🔄 My report updated via real-time:', {
-                      id: converted.id.substring(0, 8) + '...',
-                      title: converted.title,
-                      oldStatus: oldReport.status,
-                      newStatus: converted.status,
-                      oldAssigned: oldReport.assignedTo,
-                      newAssigned: converted.assignedTo,
-                      dbStatus: report.status,
-                      dbAssigned: report.assigned_to
-                    })
-                    
-                    // This state update will trigger the notification hook
-                    // The notification hook compares previousReportsRef with the new state
-                    return updated
-                  } else {
-                    // Report not in list, add it
+            if (payload.eventType === 'INSERT') {
+              // New report added - check if it belongs to this user
+              if (report && belongsToUser(report)) {
+                const converted = convertReportFromDB(report)
+                if (mounted) {
+                  setMyReports((prev) => {
+                    // Check if already exists (avoid duplicates)
+                    if (prev.some(r => r.id === converted.id)) {
+                      return prev
+                    }
                     return [converted, ...prev]
-                  }
-                })
+                  })
+                }
+              }
+            } else if (payload.eventType === 'UPDATE') {
+              // Report updated - check if it belongs to this user
+              if (report && belongsToUser(report)) {
+                const converted = convertReportFromDB(report)
+                if (mounted) {
+                  setMyReports((prev) => {
+                    const existingIndex = prev.findIndex((r) => r.id === converted.id)
+                    if (existingIndex >= 0) {
+                      // Update existing report - this will trigger notifications
+                      const updated = [...prev]
+                      const oldReport = updated[existingIndex]
+                      updated[existingIndex] = converted
+                      console.log('🔄 My report updated via real-time:', {
+                        id: converted.id.substring(0, 8) + '...',
+                        title: converted.title,
+                        oldStatus: oldReport.status,
+                        newStatus: converted.status,
+                        oldAssigned: oldReport.assignedTo,
+                        newAssigned: converted.assignedTo,
+                        dbStatus: report.status,
+                        dbAssigned: report.assigned_to
+                      })
+                      
+                      // This state update will trigger the notification hook
+                      // The notification hook compares previousReportsRef with the new state
+                      return updated
+                    } else {
+                      // Report not in list, add it
+                      return [converted, ...prev]
+                    }
+                  })
+                }
+              }
+            } else if (payload.eventType === 'DELETE') {
+              // Report deleted - remove if it was in our list
+              const deletedId = oldReport?.id || (payload.old as any)?.id
+              if (deletedId && mounted) {
+                setMyReports((prev) => prev.filter((r) => r.id !== deletedId))
               }
             }
-          } else if (payload.eventType === 'DELETE') {
-            // Report deleted - remove if it was in our list
-            const deletedId = oldReport?.id || (payload.old as any)?.id
-            if (deletedId && mounted) {
-              setMyReports((prev) => prev.filter((r) => r.id !== deletedId))
-            }
           }
-        }
-      )
-      .subscribe((status) => {
-        console.log('📡 My reports subscription status:', status)
-        if (status === 'SUBSCRIBED') {
-          console.log('✅ Successfully subscribed to my reports changes (real-time enabled)')
-        } else if (status === 'CHANNEL_ERROR') {
-          console.error('❌ My reports subscription error. Check Supabase Realtime is enabled.')
-        } else if (status === 'TIMED_OUT') {
-          console.warn('⚠️ My reports subscription timed out. Check network connection.')
-        }
-      })
+        )
+        .subscribe((status) => {
+          if (!mounted) return
+          
+          console.log('📡 My reports subscription status:', status)
+          if (status === 'SUBSCRIBED') {
+            console.log('✅ Successfully subscribed to my reports changes (real-time enabled)')
+          } else if (status === 'CHANNEL_ERROR') {
+            // Realtime is not enabled or there's a configuration issue
+            // This is not a critical error - the app will still work without real-time updates
+            console.warn(
+              '⚠️ Real-time subscription unavailable. ' +
+              'The app will continue to work, but updates may require a page refresh. ' +
+              'To enable real-time updates, enable Realtime in Supabase Dashboard → Database → Replication for the "reports" table.'
+            )
+          } else if (status === 'TIMED_OUT') {
+            console.warn('⚠️ My reports subscription timed out. Check network connection.')
+          }
+        })
+    } catch (error) {
+      // If subscription setup fails, log but don't break the app
+      console.warn('⚠️ Failed to set up real-time subscription:', error)
+      console.warn('The app will continue to work, but updates may require a page refresh.')
+    }
 
     return () => {
       mounted = false
       if (timeoutId) {
         clearTimeout(timeoutId)
       }
-      supabase.removeChannel(channel)
+      if (channel) {
+        try {
+          supabase.removeChannel(channel)
+        } catch (error) {
+          // Ignore cleanup errors
+          console.warn('Failed to remove channel:', error)
+        }
+      }
     }
   }, [deviceId, userId])
 

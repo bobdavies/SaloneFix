@@ -1,5 +1,6 @@
 export type ReportStatus = "pending" | "in-progress" | "resolved"
 export type ReportCategory = "sanitation" | "roads" | "water" | "electrical" | "other"
+export type ReportPriority = "critical" | "high" | "medium" | "low"
 
 export interface Report {
   id: string
@@ -8,6 +9,7 @@ export interface Report {
   category: ReportCategory
   status: ReportStatus
   severity: "low" | "medium" | "high"
+  priority?: ReportPriority // Auto-calculated priority
   description: string
   timestamp: Date
   reportedBy?: string
@@ -15,6 +17,17 @@ export interface Report {
   resolvedAt?: Date
   imageUrl?: string
   activityLog?: ActivityLogEntry[]
+  // Internal admin notes (not visible to citizens)
+  internalNotes?: AdminNote[]
+}
+
+export interface AdminNote {
+  id: string
+  content: string
+  author: string
+  timestamp: Date
+  isPublic?: boolean // If true, visible to reporter
+  mentions?: string[] // Array of mentioned user IDs or team names
 }
 
 export interface ActivityLogEntry {
@@ -31,6 +44,9 @@ export interface Team {
   department: string
   members: number
   activeJobs: number
+  contactEmail?: string
+  contactPhone?: string
+  description?: string
 }
 
 export const mockReports: Report[] = [
